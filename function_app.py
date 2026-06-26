@@ -2,7 +2,8 @@ import logging
 import json
 
 import azure.functions as func
-from pydantic import BaseModel
+
+# from pydantic import BaseModel
 
 # from azure_functions_openapi import (
 #     get_openapi_json,
