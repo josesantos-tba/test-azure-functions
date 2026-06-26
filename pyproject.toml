@@ -1,6 +1,7 @@
 [project]
 name = "func-portal-protheus"
 version = "0.1.0"
+description = "Portal Operacional Protheus — Azure Functions backend"
 
 [tool.poetry]
 name = "func-portal-protheus"
