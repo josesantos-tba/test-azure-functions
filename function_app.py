@@ -11,9 +11,11 @@ from azure_functions_openapi import (
 )
 
 from blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
+from blueprints.protheus_generic_query import bp as protheus_generic_query_bp
 
 app = func.FunctionApp()
 app.register_functions(protheus_get_table_columns_bp)
+app.register_functions(protheus_generic_query_bp)
 
 @app.function_name(name="openapi_json")
 @app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
