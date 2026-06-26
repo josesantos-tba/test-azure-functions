@@ -2,14 +2,14 @@ import logging
 import json
 
 import azure.functions as func
-# from pydantic import BaseModel
+from pydantic import BaseModel
 
-from azure_functions_openapi import (
-    get_openapi_json,
-    get_openapi_yaml,
-    openapi,
-    render_swagger_ui,
-)
+# from azure_functions_openapi import (
+#     get_openapi_json,
+#     get_openapi_yaml,
+#     openapi,
+#     render_swagger_ui,
+# )
 
 # from blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
 # from blueprints.protheus_generic_query import bp as protheus_generic_query_bp
