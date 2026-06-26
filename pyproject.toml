@@ -1,13 +1,9 @@
-[project]
-name = "func-portal-protheus"
-version = "0.1.0"
-description = "Portal Operacional Protheus — Azure Functions backend"
-
 [tool.poetry]
 name = "func-portal-protheus"
 version = "0.1.0"
 description = "Portal Operacional Protheus — Azure Functions backend"
 authors = ["josesaantos-tba"]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.15"
