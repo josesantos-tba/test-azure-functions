@@ -1,7 +1,7 @@
-import azure.functions as func
-import datetime
-import json
 import logging
+
+import azure.functions as func
+from pydantic import BaseModel
 
 from azure_functions_openapi import (
     get_openapi_json,
@@ -10,36 +10,22 @@ from azure_functions_openapi import (
     render_swagger_ui,
 )
 
+from blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
+
 app = func.FunctionApp()
-
-@app.route(route="HttpExample", auth_level=func.AuthLevel.FUNCTION)
-def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
-
-    name = req.params.get('name')
-    if not name:
-        try:
-            req_body = req.get_json()
-        except ValueError:
-            pass
-        else:
-            name = req_body.get('name')
-
-    if name:
-        return func.HttpResponse(f"Hello, {name}. This HTTP triggered function executed successfully.")
-    else:
-        return func.HttpResponse(
-             "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response.",
-             status_code=200
-        )
+app.register_functions(protheus_get_table_columns_bp)
 
 @app.function_name(name="openapi_json")
 @app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
         get_openapi_json(
-            title="Sample API",
-            description="OpenAPI document for the Sample API.",
+            title="Portal Operacional Protheus",
+            description=(
+            "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
+            "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
+            "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
+        ),
         ),
         mimetype="application/json",
     )
@@ -49,8 +35,12 @@ def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
 def openapi_yaml(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
         get_openapi_yaml(
-            title="Sample API",
-            description="OpenAPI document for the Sample API.",
+            title="Portal Operacional Protheus",
+            description=(
+            "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
+            "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
+            "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
+        ),
         ),
         mimetype="application/x-yaml",
     )
