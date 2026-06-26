@@ -18,22 +18,22 @@ app = func.FunctionApp()
 # app.register_functions(protheus_get_table_columns_bp)
 # app.register_functions(protheus_generic_query_bp)
 
-@openapi(
-    summary="Greet by name",
-    description="Returns a JSON greeting. Pass a `name` via query string or request body for a personalized response.",
-    tags=["Greetings"],
-    method="get",
-    parameters=[
-        {
-            "name": "name",
-            "in": "query",
-            "required": False,
-            "schema": {"type": "string"},
-            "description": "Name to include in the greeting",
-        }
-    ],
-    operation_id="httpExample",
-)
+# @openapi(
+#     summary="Greet by name",
+#     description="Returns a JSON greeting. Pass a `name` via query string or request body for a personalized response.",
+#     tags=["Greetings"],
+#     method="get",
+#     parameters=[
+#         {
+#             "name": "name",
+#             "in": "query",
+#             "required": False,
+#             "schema": {"type": "string"},
+#             "description": "Name to include in the greeting",
+#         }
+#     ],
+#     operation_id="httpExample",
+# )
 @app.route(route="HttpExample", auth_level=func.AuthLevel.FUNCTION)
 def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
@@ -59,37 +59,37 @@ def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 
-@app.function_name(name="openapi_json")
-@app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
-def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
-    return func.HttpResponse(
-        get_openapi_json(
-            title="Portal Operacional Protheus",
-            description=(
-            "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
-            "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
-            "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
-        ),
-        ),
-        mimetype="application/json",
-    )
+# @app.function_name(name="openapi_json")
+# @app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+# def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
+#     return func.HttpResponse(
+#         get_openapi_json(
+#             title="Portal Operacional Protheus",
+#             description=(
+#             "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
+#             "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
+#             "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
+#         ),
+#         ),
+#         mimetype="application/json",
+#     )
 
-@app.function_name(name="openapi_yaml")
-@app.route(route="openapi.yaml", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
-def openapi_yaml(req: func.HttpRequest) -> func.HttpResponse:
-    return func.HttpResponse(
-        get_openapi_yaml(
-            title="Portal Operacional Protheus",
-            description=(
-            "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
-            "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
-            "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
-        ),
-        ),
-        mimetype="application/x-yaml",
-    )
+# @app.function_name(name="openapi_yaml")
+# @app.route(route="openapi.yaml", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+# def openapi_yaml(req: func.HttpRequest) -> func.HttpResponse:
+#     return func.HttpResponse(
+#         get_openapi_yaml(
+#             title="Portal Operacional Protheus",
+#             description=(
+#             "API de backend do **Portal Operacional Protheus**, hospedada como Azure Function e autenticada via Microsoft Entra ID.\n\n"
+#             "Permite que usuários internos consultem informações operacionais em tempo real (produção, logística, estoque, "
+#             "pedidos e demais processos) sem necessidade de acesso direto ao ERP, ao banco de dados ou a relatórios manuais."
+#         ),
+#         ),
+#         mimetype="application/x-yaml",
+#     )
 
-@app.function_name(name="swagger_ui")
-@app.route(route="docs", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
-def swagger_ui(req: func.HttpRequest) -> func.HttpResponse:
-    return render_swagger_ui()
+# @app.function_name(name="swagger_ui")
+# @app.route(route="docs", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+# def swagger_ui(req: func.HttpRequest) -> func.HttpResponse:
+#     return render_swagger_ui()
