@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "func-portal-protheus"
+version = "0.1.0"
+description = "Portal Operacional Protheus — Azure Functions backend"
+authors = ["josesaantos-tba"]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.15"
+azure-functions = "*"
+azure-functions-openapi = "*"
+requests = "*"
+pydantic = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+pytest-mock = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

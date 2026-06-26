@@ -1,10 +1,8 @@
-# Uncomment to enable Azure Monitor OpenTelemetry
-# Ref: aka.ms/functions-azure-monitor-python 
-# azure-monitor-opentelemetry 
+# Este arquivo é gerado automaticamente pelo CI via:
+#   poetry export -f requirements.txt --output requirements.txt --without-hashes
+# Não edite manualmente — edite pyproject.toml e rode o comando acima.
 
 azure-functions
 azure-functions-openapi
 requests
 pydantic
-logging
-typing
