@@ -2,14 +2,14 @@ import logging
 import json
 
 import azure.functions as func
-from pydantic import BaseModel
+# from pydantic import BaseModel
 
-from azure_functions_openapi import (
-    get_openapi_json,
-    get_openapi_yaml,
-    openapi,
-    render_swagger_ui,
-)
+# from azure_functions_openapi import (
+#     get_openapi_json,
+#     get_openapi_yaml,
+#     openapi,
+#     render_swagger_ui,
+# )
 
 # from blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
 # from blueprints.protheus_generic_query import bp as protheus_generic_query_bp
@@ -17,47 +17,6 @@ from azure_functions_openapi import (
 app = func.FunctionApp()
 # app.register_functions(protheus_get_table_columns_bp)
 # app.register_functions(protheus_generic_query_bp)
-
-# @openapi(
-#     summary="Greet by name",
-#     description="Returns a JSON greeting. Pass a `name` via query string or request body for a personalized response.",
-#     tags=["Greetings"],
-#     method="get",
-#     parameters=[
-#         {
-#             "name": "name",
-#             "in": "query",
-#             "required": False,
-#             "schema": {"type": "string"},
-#             "description": "Name to include in the greeting",
-#         }
-#     ],
-#     operation_id="httpExample",
-# )
-@app.route(route="HttpExample", auth_level=func.AuthLevel.FUNCTION)
-def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
-
-    name = req.params.get('name')
-    if not name:
-        try:
-            req_body = req.get_json()
-        except ValueError:
-            pass
-        else:
-            name = req_body.get('name')
-
-    if name:
-        message = f"Hello, {name}. This HTTP triggered function executed successfully."
-    else:
-        message = "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response."
-
-    return func.HttpResponse(
-        json.dumps({"message":f"{message}"}),
-        status_code=200,
-        mimetype="application/json",
-    )
-
 
 # @app.function_name(name="openapi_json")
 # @app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
@@ -93,3 +52,25 @@ def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
 # @app.route(route="docs", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 # def swagger_ui(req: func.HttpRequest) -> func.HttpResponse:
 #     return render_swagger_ui()
+
+
+@app.route(route="HttpExample", auth_level=func.AuthLevel.FUNCTION)
+def HttpExample(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    name = req.params.get('name')
+    if not name:
+        try:
+            req_body = req.get_json()
+        except ValueError:
+            pass
+        else:
+            name = req_body.get('name')
+
+    if name:
+        return func.HttpResponse(f"Hello, {name}. This HTTP triggered function executed successfully.")
+    else:
+        return func.HttpResponse(
+             "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response.",
+             status_code=200
+        )
