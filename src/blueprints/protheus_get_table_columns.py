@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from azure_functions_openapi import openapi
 
-from utils.openapi import inline_refs
+from src.utils.openapi import inline_refs
 
 bp = func.Blueprint()
 
