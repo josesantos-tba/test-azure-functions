@@ -1,0 +1,274 @@
+import json
+import logging
+import os
+from datetime import datetime
+from typing import Any
+
+import azure.functions as func
+import requests
+from pydantic import BaseModel
+
+from azure_functions_openapi import openapi
+
+from src.utils.openapi import inline_refs
+
+bp = func.Blueprint()
+
+_PROTHEUS_BASE_URL = os.environ.get("PROTHEUS_BASE_URL", "")
+_PROTHEUS_AUTH = (
+    os.environ.get("PROTHEUS_USER", ""),
+    os.environ.get("PROTHEUS_PASSWORD", ""),
+)
+
+_DEFAULT_PAGESIZE = 100
+_MAX_PAGESIZE = 10000
+
+_ERROR_SCHEMA = {
+    "type": "object",
+    "properties": {"error": {"type": "string", "example": "Mensagem de erro"}},
+    "required": ["error"],
+}
+
+
+class QueryResponse(BaseModel):
+    total: int
+    has_next: bool
+    page: int
+    pagesize: int
+    items: list[dict[str, Any]]
+
+
+def _parse_int(value: str, default: int) -> int | None:
+    """Retorna o inteiro contido em ``value`` ou ``default`` se vazio; ``None`` se inválido."""
+    value = value.strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _to_protheus_date(value: str) -> str | None:
+    """Converte uma data ``YYYY-MM-DD`` para o formato Protheus ``YYYYMMDD``.
+
+    Retorna ``None`` se a data for inválida.
+    """
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y%m%d")
+    except ValueError:
+        return None
+
+
+@openapi(
+    summary="Consulta em tabela do Protheus (JSON) com paginação e filtro por data",
+    description=(
+        "Executa uma consulta parametrizável em qualquer tabela do Protheus via **genericQuery** "
+        "e retorna os dados em **JSON**.\n\n"
+        "Suporta paginação (`page`/`pagesize`) e filtro por intervalo de datas: informe a coluna "
+        "de data em `date_column` e o intervalo em `start_date`/`end_date` (formato `YYYY-MM-DD`).\n\n"
+        "Exemplo de chamada:\n"
+        "```\n"
+        "GET /api/query-json"
+        "?table=SE5"
+        "&fields=E5_FILIAL,E5_NUM,E5_DATA,E5_VALOR"
+        "&date_column=E5_DATA"
+        "&start_date=2025-01-01"
+        "&end_date=2025-01-31"
+        "&page=1"
+        "&pagesize=50"
+        "```"
+    ),
+    tags=["Protheus"],
+    method="get",
+    parameters=[
+        {
+            "name": "table",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "example": "SE5"},
+            "description": "Nome da tabela no Protheus (ex: SE5, SA1, SB1)",
+        },
+        {
+            "name": "fields",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "example": "E5_FILIAL,E5_NUM,E5_DATA,E5_VALOR"},
+            "description": "Colunas desejadas separadas por vírgula",
+        },
+        {
+            "name": "date_column",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "example": "E5_DATA"},
+            "description": (
+                "Coluna de data usada como filtro. Obrigatória quando "
+                "`start_date` ou `end_date` forem informados."
+            ),
+        },
+        {
+            "name": "start_date",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date", "example": "2025-01-01"},
+            "description": "Data inicial do filtro (formato YYYY-MM-DD)",
+        },
+        {
+            "name": "end_date",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date", "example": "2025-01-31"},
+            "description": "Data final do filtro (formato YYYY-MM-DD)",
+        },
+        {
+            "name": "page",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "integer", "default": 1, "example": 1},
+            "description": "Número da página a retornar (começa em 1)",
+        },
+        {
+            "name": "pagesize",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "integer", "default": _DEFAULT_PAGESIZE, "example": 50},
+            "description": f"Quantidade de registros por página (máx. {_MAX_PAGESIZE})",
+        },
+    ],
+    response={
+        200: {
+            "description": "Dados retornados com sucesso",
+            "content": {
+                "application/json": {
+                    "schema": inline_refs(QueryResponse.model_json_schema()),
+                    "example": {
+                        "total": 137,
+                        "has_next": True,
+                        "page": 1,
+                        "pagesize": 50,
+                        "items": [
+                            {
+                                "e5_filial": "01",
+                                "e5_num": "000001",
+                                "e5_data": "20250115",
+                                "e5_valor": 1500.0,
+                            },
+                        ],
+                    },
+                }
+            },
+        },
+        400: {
+            "description": "Parâmetros obrigatórios ausentes ou inválidos",
+            "content": {
+                "application/json": {
+                    "schema": _ERROR_SCHEMA,
+                    "example": {"error": "Parâmetros obrigatórios ausentes: table, fields"},
+                }
+            },
+        },
+        502: {
+            "description": "Falha ao conectar ou obter resposta da API do Protheus",
+            "content": {
+                "application/json": {
+                    "schema": _ERROR_SCHEMA,
+                    "example": {"error": "Falha ao conectar à API do Protheus"},
+                }
+            },
+        },
+    },
+    operation_id="queryJson",
+)
+@bp.route(route="query-json", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+def query_json(req: func.HttpRequest) -> func.HttpResponse:
+
+    table = req.params.get("table", "").strip()
+    fields = req.params.get("fields", "").strip()
+    date_column = req.params.get("date_column", "").strip()
+    start_date = req.params.get("start_date", "").strip()
+    end_date = req.params.get("end_date", "").strip()
+
+    missing = [p for p, v in [("table", table), ("fields", fields)] if not v]
+    if missing:
+        return func.HttpResponse(
+            json.dumps({"error": f"Parâmetros obrigatórios ausentes: {', '.join(missing)}"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    if (start_date or end_date) and not date_column:
+        return func.HttpResponse(
+            json.dumps(
+                {"error": "Informe 'date_column' ao usar 'start_date' ou 'end_date'"}
+            ),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    page = _parse_int(req.params.get("page", ""), 1)
+    pagesize = _parse_int(req.params.get("pagesize", ""), _DEFAULT_PAGESIZE)
+    if page is None or pagesize is None or page < 1 or pagesize < 1:
+        return func.HttpResponse(
+            json.dumps({"error": "'page' e 'pagesize' devem ser inteiros >= 1"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    pagesize = min(pagesize, _MAX_PAGESIZE)
+
+    where_parts = [f"{table}.D_E_L_E_T_=' '"]
+
+
+    for name, value, operator in [
+        ("start_date", start_date, ">="),
+        ("end_date", end_date, "<="),
+    ]:
+        if not value:
+            continue
+        protheus_date = _to_protheus_date(value)
+        if protheus_date is None:
+            return func.HttpResponse(
+                json.dumps({"error": f"'{name}' inválido. Use o formato YYYY-MM-DD"}),
+                status_code=400,
+                mimetype="application/json",
+            )
+        where_parts.append(f"{date_column}{operator}'{protheus_date}'")
+
+    query_params: dict[str, str] = {
+        "tables": table,
+        "fields": fields,
+        "where": " AND ".join(where_parts),
+        "page": str(page),
+        "pagesize": str(pagesize),
+    }
+
+    try:
+        resp = requests.get(
+            f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",
+            params=query_params,
+            auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logging.error("Protheus queryJson failed: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": "Falha ao conectar à API do Protheus"}),
+            status_code=502,
+            mimetype="application/json",
+        )
+
+    data = resp.json()
+    items: list[dict[str, Any]] = data.get("items", [])
+
+    return func.HttpResponse(
+        QueryResponse(
+            total=int(data.get("total", 0)),
+            has_next=bool(data.get("hasNext", False)),
+            page=page,
+            pagesize=pagesize,
+            items=items,
+        ).model_dump_json(),
+        status_code=200,
+        mimetype="application/json",
+    )

@@ -7,6 +7,7 @@ from azure_functions_openapi import ( get_openapi_json, openapi, render_swagger_
 from src.blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
 from src.blueprints.protheus_generic_query import bp as protheus_generic_query_bp
 from src.blueprints.protheus_list_tables import bp as protheus_list_tables_bp
+from src.blueprints.protheus_query_json import bp as protheus_query_json_bp
 
 _STATIC_DIR = pathlib.Path(__file__).parent.parent / "src" / "static"
 
@@ -24,6 +25,7 @@ app = func.FunctionApp()
 app.register_functions(protheus_get_table_columns_bp)
 app.register_functions(protheus_generic_query_bp)
 app.register_functions(protheus_list_tables_bp)
+app.register_functions(protheus_query_json_bp)
 
 @app.function_name(name="openapi_json")
 @app.route(route="openapi.json", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
