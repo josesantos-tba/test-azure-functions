@@ -187,7 +187,7 @@ def _to_protheus_date(value: str) -> str | None:
     },
     operation_id="queryJson",
 )
-@bp.route(route="query-json", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@bp.route(route="query-json", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     table = req.params.get("table", "").strip()

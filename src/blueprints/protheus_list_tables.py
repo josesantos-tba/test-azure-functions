@@ -83,7 +83,7 @@ class TablesResponse(BaseModel):
     },
     operation_id="listTables",
 )
-@bp.route(route="tables", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@bp.route(route="tables", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def list_tables(req: func.HttpRequest) -> func.HttpResponse:
     url = f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery"
     params = {

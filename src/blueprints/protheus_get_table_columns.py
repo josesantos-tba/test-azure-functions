@@ -96,7 +96,7 @@ class TableColumnsResponse(BaseModel):
     },
     operation_id="getTableColumns",
 )
-@bp.route(route="table-columns", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@bp.route(route="table-columns", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_table_columns(req: func.HttpRequest) -> func.HttpResponse:
     table = req.params.get("table", "").strip().upper()
     if not table:

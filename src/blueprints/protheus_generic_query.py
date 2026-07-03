@@ -86,7 +86,7 @@ _ERROR_SCHEMA = {
     },
     operation_id="genericQuery",
 )
-@bp.route(route="generic-query", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@bp.route(route="generic-query", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def generic_query(req: func.HttpRequest) -> func.HttpResponse:
     table  = req.params.get("table",  "").strip()
     fields = req.params.get("fields", "").strip()

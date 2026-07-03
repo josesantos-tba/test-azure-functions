@@ -28,7 +28,7 @@ app.register_functions(protheus_list_tables_bp)
 app.register_functions(protheus_query_json_bp)
 
 @app.function_name(name="openapi_json")
-@app.route(route="openapi.json", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+@app.route(route="openapi.json", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
         get_openapi_json(title=_OPENAPI_TITLE, description=_OPENAPI_DESCRIPTION),
@@ -36,7 +36,7 @@ def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 @app.function_name(name="swagger_ui")
-@app.route(route="docs/swagger", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+@app.route(route="docs/swagger", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def swagger_ui(req: func.HttpRequest) -> func.HttpResponse:
     return render_swagger_ui(openapi_url=_OPENAPI_URL)
 
@@ -49,7 +49,7 @@ def scalar_js(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 @app.function_name(name="scalar_ui")
-@app.route(route="docs", auth_level=func.AuthLevel.FUNCTION, methods=["GET"])
+@app.route(route="docs", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def scalar_ui(req: func.HttpRequest) -> func.HttpResponse:
     html = f"""<!doctype html>
 <html>
