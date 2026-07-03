@@ -6,7 +6,7 @@ from typing import Any
 
 import azure.functions as func
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from azure_functions_openapi import openapi
 
@@ -31,11 +31,19 @@ _ERROR_SCHEMA = {
 
 
 class QueryResponse(BaseModel):
-    total: int
-    has_next: bool
-    page: int
-    pagesize: int
-    items: list[dict[str, Any]]
+    total: int = Field(
+        description="Total de registros que atendem à consulta (todas as páginas)."
+    )
+    has_next: bool = Field(description="Indica se há uma próxima página.")
+    page: int = Field(description="Página retornada.")
+    pagesize: int = Field(description="Registros por página.")
+    items: list[dict[str, Any]] = Field(
+        description=(
+            "Registros retornados. Cada item é um objeto dinâmico cujas chaves "
+            "correspondem às colunas pedidas em `fields` (em minúsculas) e os valores "
+            "podem ser de qualquer tipo (string, número, etc.) conforme o campo no Protheus."
+        )
+    )
 
 
 def _parse_int(value: str, default: int) -> int | None:
@@ -218,7 +226,6 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     where_parts = [f"{table}.D_E_L_E_T_=' '"]
 
-
     for name, value, operator in [
         ("start_date", start_date, ">="),
         ("end_date", end_date, "<="),
@@ -258,7 +265,24 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        # Protheus respondeu algo que não é JSON (corpo vazio, HTML de erro, etc.).
+        # Causa comum: URL longa demais (muitas colunas em 'fields') ou campo inválido.
+        logging.error(
+            "Protheus queryJson retornou resposta não-JSON (status=%s): %.500s",
+            resp.status_code,
+            resp.text,
+        )
+        return func.HttpResponse(
+            json.dumps(
+                {"error": "Resposta inválida do Protheus (não-JSON). Verifique os campos e o tamanho da consulta."}
+            ),
+            status_code=502,
+            mimetype="application/json",
+        )
+
     items: list[dict[str, Any]] = data.get("items", [])
 
     return func.HttpResponse(
