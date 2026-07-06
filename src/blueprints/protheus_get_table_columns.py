@@ -28,7 +28,7 @@ _ERROR_SCHEMA = {
 # pedidos em 'fields' e por isso são omitidos da lista de colunas:
 #   - sufixos de controle/log de acesso do Protheus (_USERLGI, _USERLGA);
 #   - campos do tipo Memo ('M'), que a API não consegue serializar.
-_EXCLUDED_COLUMN_SUFFIXES = ("_USERLGI", "_USERLGA")
+_EXCLUDED_COLUMN_SUFFIXES = ("_USERLGI", "_USERLGA","_USERGI","USERGA")
 _EXCLUDED_COLUMN_TYPES = ("M",)
 
 
