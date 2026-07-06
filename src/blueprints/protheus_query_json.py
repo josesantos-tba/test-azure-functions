@@ -249,6 +249,8 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
         "pagesize": str(pagesize),
     }
 
+    print(query_params)
+
     try:
         resp = requests.get(
             f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",

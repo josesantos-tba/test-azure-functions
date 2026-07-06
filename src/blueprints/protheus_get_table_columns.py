@@ -24,6 +24,18 @@ _ERROR_SCHEMA = {
     "required": ["error"],
 }
 
+# Campos que fazem o genericQuery responder "no content" (corpo vazio) quando
+# pedidos em 'fields' e por isso são omitidos da lista de colunas:
+#   - sufixos de controle/log de acesso do Protheus (_USERLGI, _USERLGA);
+#   - campos do tipo Memo ('M'), que a API não consegue serializar.
+_EXCLUDED_COLUMN_SUFFIXES = ("_USERLGI", "_USERLGA")
+_EXCLUDED_COLUMN_TYPES = ("M",)
+
+
+def _is_excluded_column(campo: str, tipo: str) -> bool:
+    """Indica se o campo é interno/incompatível e quebra o genericQuery."""
+    return campo.upper().endswith(_EXCLUDED_COLUMN_SUFFIXES) or tipo.upper() in _EXCLUDED_COLUMN_TYPES
+
 
 class TableColumn(BaseModel):
     campo: str
@@ -46,7 +58,9 @@ class TableColumnsResponse(BaseModel):
         "```\n"
         "tables=SX3&fields=X3_CAMPO,X3_TITULO,X3_TIPO,X3_TAMANHO\n"
         "&where=SX3.D_E_L_E_T_=' ' AND SX3.X3_ARQUIVO='{table}'\n"
-        "```"
+        "```\n\n"
+        "Campos que fazem o `genericQuery` responder *no content* são omitidos: "
+        "campos de controle/log (sufixos `_USERLGI` e `_USERLGA`) e campos do tipo Memo (`M`)."
     ),
     tags=["Protheus"],
     method="get",
@@ -131,16 +145,20 @@ def get_table_columns(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    items = resp.json().get("items", [])
-    columns = [
-        TableColumn(
-            campo=item.get("x3_campo", "").strip(),
-            titulo=item.get("x3_titulo", "").strip(),
-            tipo=item.get("x3_tipo", "").strip(),
-            tamanho=int(item.get("x3_tamanho", 0)),
+    columns: list[TableColumn] = []
+    for item in resp.json().get("items", []):
+        campo = item.get("x3_campo", "").strip()
+        tipo = item.get("x3_tipo", "").strip()
+        if not campo or _is_excluded_column(campo, tipo):
+            continue
+        columns.append(
+            TableColumn(
+                campo=campo,
+                titulo=item.get("x3_titulo", "").strip(),
+                tipo=tipo,
+                tamanho=int(item.get("x3_tamanho", 0)),
+            )
         )
-        for item in items
-    ]
 
     return func.HttpResponse(
         TableColumnsResponse(tabela=table, colunas=columns).model_dump_json(),
