@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -68,22 +69,176 @@ def _to_protheus_date(value: str) -> str | None:
         return None
 
 
+# Operadores que comparam a coluna com um único valor (col <op> valor).
+_COMPARISON_OPERATORS = {"=", "!=", ">", "<", "<=", ">="}
+# Operadores de texto que usam LIKE.
+_LIKE_OPERATORS = {"contem", "comeca com", "termina em"}
+# Operadores que não recebem valor.
+_NO_VALUE_OPERATORS = {"em branco", "nao em branco"}
+# Conjunto completo de operadores aceitos.
+_VALID_OPERATORS = (
+    _COMPARISON_OPERATORS | _LIKE_OPERATORS | _NO_VALUE_OPERATORS | {"entre"}
+)
+# Tipos aceitos para o valor do filtro.
+_VALID_TYPES = {"string", "number", "date"}
+# Nome de coluna válido (evita injeção via nome de coluna).
+_COLUMN_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+
+def _escape(value: str) -> str:
+    """Escapa aspas simples para não quebrar (ou injetar) a cláusula WHERE."""
+    return str(value).replace("'", "''")
+
+
+def _format_scalar(value: Any, vtype: str) -> tuple[str | None, str | None]:
+    """Formata um valor único como literal SQL conforme o tipo.
+
+    Retorna ``(literal, None)`` em caso de sucesso ou ``(None, erro)``.
+    """
+    text = str(value).strip()
+    if vtype == "number":
+        try:
+            float(text)
+        except ValueError:
+            return None, f"Valor numérico inválido: '{value}'"
+        return text, None
+    if vtype == "date":
+        protheus_date = _to_protheus_date(text)
+        if protheus_date is None:
+            return None, f"Data inválida: '{value}'. Use o formato YYYY-MM-DD"
+        return f"'{protheus_date}'", None
+    # string (padrão): sempre entre aspas e com escape.
+    return f"'{_escape(text)}'", None
+
+
+def _build_filter_condition(
+    column: str, operator: str, value: Any, value2: Any, vtype: str
+) -> tuple[str | None, str | None]:
+    """Monta a condição SQL de um filtro.
+
+    Retorna ``(condição, None)`` em caso de sucesso ou ``(None, erro)``.
+    """
+    if not column:
+        return None, "Filtro sem 'column'"
+    if not _COLUMN_RE.match(column):
+        return None, f"Nome de coluna inválido: '{column}'"
+    if operator not in _VALID_OPERATORS:
+        return None, (
+            f"Operador inválido: '{operator}'. "
+            f"Válidos: {', '.join(sorted(_VALID_OPERATORS))}"
+        )
+    if vtype not in _VALID_TYPES:
+        return None, f"Tipo inválido: '{vtype}'. Válidos: {', '.join(sorted(_VALID_TYPES))}"
+
+    if operator in _NO_VALUE_OPERATORS:
+        if operator == "em branco":
+            return f"({column} IS NULL OR RTRIM({column})='')", None
+        return f"({column} IS NOT NULL AND RTRIM({column})<>'')", None
+
+    if operator in _LIKE_OPERATORS:
+        text = _escape(value)
+        pattern = {
+            "contem": f"%{text}%",
+            "comeca com": f"{text}%",
+            "termina em": f"%{text}",
+        }[operator]
+        return f"{column} LIKE '{pattern}'", None
+
+    if operator == "entre":
+        literal_start, err = _format_scalar(value, vtype)
+        if err:
+            return None, err
+        literal_end, err = _format_scalar(value2, vtype)
+        if err:
+            return None, err
+        return f"{column} BETWEEN {literal_start} AND {literal_end}", None
+
+    # Operadores de comparação simples (=, !=, >, <, <=, >=).
+    literal, err = _format_scalar(value, vtype)
+    if err:
+        return None, err
+    return f"{column}{operator}{literal}", None
+
+
+def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
+    """Interpreta o parâmetro ``filters`` (JSON) e devolve as condições SQL.
+
+    Retorna ``(condições, None)`` em caso de sucesso ou ``(None, erro)``.
+    """
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None, "'filters' deve ser um JSON válido (array de objetos)"
+
+    if not isinstance(parsed, list):
+        return None, "'filters' deve ser um array JSON de objetos"
+
+    conditions: list[str] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            return None, f"Filtro na posição {index} deve ser um objeto"
+
+        column = str(item.get("column", "")).strip()
+        operator = str(item.get("operator", "")).strip()
+        vtype = str(item.get("type", "string")).strip().lower() or "string"
+        value = item.get("value", "")
+        value2 = item.get("value2", "")
+
+        # Conveniência: no 'entre', aceita value como lista [inicio, fim].
+        if operator == "entre" and isinstance(value, list):
+            if len(value) != 2:
+                return None, (
+                    f"Filtro na posição {index}: 'entre' exige exatamente 2 valores"
+                )
+            value, value2 = value[0], value[1]
+
+        if operator in _COMPARISON_OPERATORS or operator in _LIKE_OPERATORS:
+            if str(value).strip() == "":
+                return None, (
+                    f"Filtro na posição {index}: operador '{operator}' exige 'value'"
+                )
+        if operator == "entre" and (
+            str(value).strip() == "" or str(value2).strip() == ""
+        ):
+            return None, (
+                f"Filtro na posição {index}: 'entre' exige 'value' e 'value2'"
+            )
+
+        condition, err = _build_filter_condition(column, operator, value, value2, vtype)
+        if err:
+            return None, f"Filtro na posição {index}: {err}"
+        conditions.append(condition)
+
+    return conditions, None
+
+
 @openapi(
-    summary="Consulta em tabela do Protheus (JSON) com paginação e filtro por data",
+    summary="Consulta em tabela do Protheus (JSON) com paginação e filtros dinâmicos",
     description=(
         "Executa uma consulta parametrizável em qualquer tabela do Protheus via **genericQuery** "
         "e retorna os dados em **JSON**.\n\n"
-        "Suporta paginação (`page`/`pagesize`) e filtro por intervalo de datas: informe a coluna "
-        "de data em `date_column` e o intervalo em `start_date`/`end_date` (formato `YYYY-MM-DD`).\n\n"
+        "Suporta paginação (`page`/`pagesize`) e **filtros dinâmicos** via `filters`, "
+        "onde é possível informar N condições — inclusive filtro por data, que é apenas "
+        "um filtro com `type: date`.\n\n"
+        "### Filtros dinâmicos (`filters`)\n"
+        "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
+        "- `column` (obrigatório): nome da coluna (ex: `E5_VALOR`).\n"
+        "- `operator` (obrigatório): um dos operadores abaixo.\n"
+        "- `value`: valor comparado (dispensado em `em branco`/`nao em branco`).\n"
+        "- `value2`: segundo valor, usado apenas no operador `entre` "
+        "(ou informe `value` como lista `[inicio, fim]`).\n"
+        "- `type` (opcional): `string` (padrão), `number` ou `date` (`YYYY-MM-DD`).\n\n"
+        "Operadores suportados: `=`, `!=`, `>`, `<`, `<=`, `>=`, `contem`, "
+        "`comeca com`, `termina em`, `entre`, `em branco`, `nao em branco`.\n\n"
         "Exemplo de chamada:\n"
         "```\n"
         "GET /api/query-json"
         "?table=SE5"
         "&fields=E5_FILIAL,E5_NUM,E5_DATA,E5_VALOR"
-        "&date_column=E5_DATA"
-        "&start_date=2025-01-01"
-        "&end_date=2025-01-31"
-        "&page=1"
+        "&filters=" + '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
+        '{"column":"E5_NUM","operator":"comeca com","value":"0001"},'
+        '{"column":"E5_DATA","operator":"entre","value":["2025-01-01","2025-01-31"],"type":"date"}]'
+        + "&page=1"
         "&pagesize=50"
         "```"
     ),
@@ -105,28 +260,22 @@ def _to_protheus_date(value: str) -> str | None:
             "description": "Colunas desejadas separadas por vírgula",
         },
         {
-            "name": "date_column",
+            "name": "filters",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "example": "E5_DATA"},
+            "schema": {
+                "type": "string",
+                "example": (
+                    '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
+                    '{"column":"E5_NUM","operator":"comeca com","value":"0001"}]'
+                ),
+            },
             "description": (
-                "Coluna de data usada como filtro. Obrigatória quando "
-                "`start_date` ou `end_date` forem informados."
+                "Array JSON de filtros dinâmicos. Cada objeto: `column` (obrigatório), "
+                "`operator` (=, !=, >, <, <=, >=, contem, comeca com, termina em, entre, "
+                "em branco, nao em branco), `value`, `value2` (para 'entre') e "
+                "`type` (string | number | date). Múltiplos filtros são combinados com AND."
             ),
-        },
-        {
-            "name": "start_date",
-            "in": "query",
-            "required": False,
-            "schema": {"type": "string", "format": "date", "example": "2025-01-01"},
-            "description": "Data inicial do filtro (formato YYYY-MM-DD)",
-        },
-        {
-            "name": "end_date",
-            "in": "query",
-            "required": False,
-            "schema": {"type": "string", "format": "date", "example": "2025-01-31"},
-            "description": "Data final do filtro (formato YYYY-MM-DD)",
         },
         {
             "name": "page",
@@ -192,23 +341,12 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     table = req.params.get("table", "").strip()
     fields = req.params.get("fields", "").strip()
-    date_column = req.params.get("date_column", "").strip()
-    start_date = req.params.get("start_date", "").strip()
-    end_date = req.params.get("end_date", "").strip()
+    filters_raw = req.params.get("filters", "").strip()
 
     missing = [p for p, v in [("table", table), ("fields", fields)] if not v]
     if missing:
         return func.HttpResponse(
             json.dumps({"error": f"Parâmetros obrigatórios ausentes: {', '.join(missing)}"}),
-            status_code=400,
-            mimetype="application/json",
-        )
-
-    if (start_date or end_date) and not date_column:
-        return func.HttpResponse(
-            json.dumps(
-                {"error": "Informe 'date_column' ao usar 'start_date' ou 'end_date'"}
-            ),
             status_code=400,
             mimetype="application/json",
         )
@@ -226,20 +364,15 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     where_parts = [f"{table}.D_E_L_E_T_=' '"]
 
-    for name, value, operator in [
-        ("start_date", start_date, ">="),
-        ("end_date", end_date, "<="),
-    ]:
-        if not value:
-            continue
-        protheus_date = _to_protheus_date(value)
-        if protheus_date is None:
+    if filters_raw:
+        conditions, err = _parse_filters(filters_raw)
+        if err:
             return func.HttpResponse(
-                json.dumps({"error": f"'{name}' inválido. Use o formato YYYY-MM-DD"}),
+                json.dumps({"error": err}),
                 status_code=400,
                 mimetype="application/json",
             )
-        where_parts.append(f"{date_column}{operator}'{protheus_date}'")
+        where_parts.extend(conditions)
 
     query_params: dict[str, str] = {
         "tables": table,
@@ -256,7 +389,7 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",
             params=query_params,
             auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
-            timeout=30,
+            timeout=60*10,
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
