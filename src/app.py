@@ -36,7 +36,7 @@ def openapi_json(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name(name="swagger_ui")
 @app.route(route="docs/swagger", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def swagger_ui(req: func.HttpRequest) -> func.HttpResponse:
-    return render_swagger_ui(openapi_url=_OPENAPI_URL)
+    return render_swagger_ui(openapi_url="api/openapi.json")
 
 @app.function_name(name="scalar_js")
 @app.route(route="static/scalar.js", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
@@ -57,7 +57,7 @@ def scalar_ui(req: func.HttpRequest) -> func.HttpResponse:
     <meta name="viewport" content="width=device-width, initial-scale=1" />
   </head>
   <body>
-    <script id="api-reference" data-url="/{_OPENAPI_URL}"></script>
+    <script id="api-reference" data-url="/api/openapi.json"></script>
     <script src="/api/static/scalar.js"></script>
   </body>
 </html>"""
