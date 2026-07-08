@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from azure_functions_openapi import openapi
 
+from src.utils.auth import require_roles
 from src.utils.openapi import inline_refs
 
 bp = func.Blueprint()
@@ -71,6 +72,27 @@ class TablesResponse(BaseModel):
                 }
             },
         },
+        401: {
+            "description": "Requisição não autenticada (token do Entra ID ausente ou inválido)",
+            "content": {
+                "application/json": {
+                    "schema": _ERROR_SCHEMA,
+                    "example": {"error": "Requisição não autenticada."},
+                }
+            },
+        },
+        403: {
+            "description": "Usuário autenticado sem a role 'Tables.Read'",
+            "content": {
+                "application/json": {
+                    "schema": _ERROR_SCHEMA,
+                    "example": {
+                        "error": "Acesso negado: você não tem a permissão necessária "
+                        "para acessar este recurso."
+                    },
+                }
+            },
+        },
         502: {
             "description": "Falha ao conectar ou obter resposta da API do Protheus",
             "content": {
@@ -84,6 +106,7 @@ class TablesResponse(BaseModel):
     operation_id="listTables",
 )
 @bp.route(route="tables", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@require_roles("Tables.Read")
 def list_tables(req: func.HttpRequest) -> func.HttpResponse:
     url = f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery"
     params = {
