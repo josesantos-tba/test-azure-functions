@@ -405,7 +405,9 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
         "pagesize": str(pagesize),
     }
 
-    print(query_params)
+    headers = {
+        "FilialFilter": "false"
+    }
 
     try:
         resp = requests.get(
@@ -413,6 +415,7 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             params=query_params,
             auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
             timeout=60*10,
+            headers=headers
         )
         resp.raise_for_status()
     except requests.RequestException as exc:

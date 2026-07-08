@@ -117,12 +117,17 @@ def list_tables(req: func.HttpRequest) -> func.HttpResponse:
         "pagesize": "9999999",
     }
 
+    headers = {
+        "FilialFilter": "false"
+    }
+
     try:
         resp = requests.get(
             url,
             params=params,
             auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
             timeout=30,
+            headers=headers
         )
         resp.raise_for_status()
     except requests.RequestException as exc:

@@ -152,12 +152,17 @@ def get_table_columns(req: func.HttpRequest) -> func.HttpResponse:
         "pagesize": "1000",
     }
 
+    headers = {
+        "FilialFilter": "false"
+    }
+
     try:
         resp = requests.get(
             url,
             params=params,
             auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
             timeout=30,
+            headers=headers
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
