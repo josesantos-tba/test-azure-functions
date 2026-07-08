@@ -31,11 +31,11 @@ _ROLE_CLAIM_TYPES = {
 def _running_in_azure() -> bool:
     """Indica se o código está executando no Azure.
 
-    A plataforma (App Service/Functions) sempre define ``WEBSITE_INSTANCE_ID``;
+    A plataforma (App Service/Functions) sempre define ``MICROSOFT_PROVIDER_AUTHENTICATION_SECRET``;
     em execução local (``func start``) essa variável não existe. Fora do Azure
     não há EasyAuth para injetar o principal, então a autorização é ignorada.
     """
-    return bool(os.environ.get("WEBSITE_INSTANCE_ID"))
+    return bool(os.environ.get("MICROSOFT_PROVIDER_AUTHENTICATION_SECRET"))
 
 
 def _json_error(message: str, status: int) -> func.HttpResponse:
