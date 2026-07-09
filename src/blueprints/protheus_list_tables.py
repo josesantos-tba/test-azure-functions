@@ -19,6 +19,26 @@ _PROTHEUS_AUTH = (
     os.environ.get("PROTHEUS_PASSWORD", ""),
 )
 
+# Filtro temporário: somente estas tabelas (nome físico) são retornadas.
+_ALLOWED_TABLES = frozenset(
+    {
+        "SC5010", "SB1010", "SD2010", "C1P010", "CT1010", "CT2010", "CV3010",
+        "DA1010", "NNR010", "SA1010", "SB2010", "SA2010", "SBM010", "SD1010",
+        "SE1010", "SE2010", "SE5010", "SED010", "SF1010", "SF2010", "SG1010",
+        "SN4010", "SX5010", "SX2010", "SX3010", "C00010", "CC0010", "CTT010",
+        "SE4010", "SC7010", "SC1010", "SYS_USR", "SYS_GRP_FILIAL", "SC9010",
+        "DAK010", "SY1010", "CTK010", "CT5010", "SYS_COMPANY", "TOTVS_AUDIT",
+        "SB8010", "SCR010", "CTH010", "SCY010", "SC6010", "SD3010", "SD4010",
+        "SBF010", "SB5010", "SBE010", "SA6010", "SEB010", "SEA010", "SF5010",
+        "SC2010", "SB9010",
+    }
+)
+
+
+def _is_allowed(chave: str) -> bool:
+    return chave in _ALLOWED_TABLES or f"{chave}010" in _ALLOWED_TABLES
+
+
 _ERROR_SCHEMA = {
     "type": "object",
     "properties": {"error": {"type": "string", "example": "Mensagem de erro"}},
@@ -148,6 +168,7 @@ def list_tables(req: func.HttpRequest) -> func.HttpResponse:
             pyme=item.get("x2_pyme", "").strip(),
         )
         for item in items
+        if _is_allowed(item.get("x2_chave", "").strip())
     ]
 
     return func.HttpResponse(
