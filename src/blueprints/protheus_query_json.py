@@ -25,6 +25,21 @@ _PROTHEUS_AUTH = (
 _DEFAULT_PAGESIZE = 100
 _MAX_PAGESIZE = 10000
 
+# Alias de tabela válido (evita injeção via nome de tabela no FromQry).
+_TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+# Sufixo padrão que converte o alias (ex: CTK) no nome físico (ex: CTK010).
+_TABLE_SUFFIX = "010"
+
+# FromQry com o WHERE (deleção e filtros dinâmicos) embutido na subquery,
+# sem usar o parâmetro 'where' do Protheus. A paginação é feita por
+# OFFSET/FETCH sobre R_E_C_N_O_: busca-se pagesize+1 linhas e a linha extra
+# indica se há próxima página (o Protheus não retorna a coluna R_E_C_N_O_).
+_FROM_QRY_TEMPLATE = (
+    "(SELECT * FROM {table} WHERE {where} "
+    "ORDER BY R_E_C_N_O_ ASC OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY) {alias}"
+)
+
 _ERROR_SCHEMA = {
     "type": "object",
     "properties": {"error": {"type": "string", "example": "Mensagem de erro"}},
@@ -33,12 +48,10 @@ _ERROR_SCHEMA = {
 
 
 class QueryResponse(BaseModel):
-    total: int = Field(
-        description="Total de registros que atendem à consulta (todas as páginas)."
-    )
-    has_next: bool = Field(description="Indica se há uma próxima página.")
-    page: int = Field(description="Página retornada.")
+    page: int = Field(description="Página retornada (começa em 1).")
     pagesize: int = Field(description="Registros por página.")
+    has_next: bool = Field(description="Indica se há uma próxima página.")
+    has_previous: bool = Field(description="Indica se há uma página anterior.")
     items: list[dict[str, Any]] = Field(
         description=(
             "Registros retornados. Cada item é um objeto dinâmico cujas chaves "
@@ -214,13 +227,30 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
 
 
 @openapi(
-    summary="Consulta em tabela do Protheus (JSON) com paginação e filtros dinâmicos",
+    summary="Consulta em tabela do Protheus (JSON) com filtros dinâmicos",
     description=(
         "Executa uma consulta parametrizável em qualquer tabela do Protheus via **genericQuery** "
         "e retorna os dados em **JSON**.\n\n"
-        "Suporta paginação (`page`/`pagesize`) e **filtros dinâmicos** via `filters`, "
-        "onde é possível informar N condições — inclusive filtro por data, que é apenas "
-        "um filtro com `type: date`.\n\n"
+        "A tabela é informada pelo **alias** (ex: `CTK`, `SB1`); o nome físico é montado "
+        f"com o sufixo `{_TABLE_SUFFIX}` (ex: `CTK` → `CTK{_TABLE_SUFFIX}`).\n\n"
+        "Internamente a genericQuery é chamada com os parâmetros no **header** — o WHERE "
+        "(deleção e filtros) fica embutido no `FromQry`, sem usar o parâmetro "
+        "`where` do Protheus:\n"
+        "```\n"
+        "tables=CTK\n"
+        "fields=CTK_FILIAL,CTK_CODFOR,CTK_CODCLI,CTK_SEQUEN\n"
+        "pagesize=50\n"
+        f"FromQry=(SELECT * FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ > 0 AND "
+        "D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ ASC OFFSET 0 ROWS "
+        "FETCH NEXT 51 ROWS ONLY) CTK\n"
+        "FilialFilter=false\n"
+        "```\n\n"
+        "### Paginação (page + pagesize)\n"
+        "A subquery busca sempre `pagesize + 1` registros (ex: 51 para `pagesize=50`), "
+        "mas somente `pagesize` são devolvidos ao usuário — o registro extra indica se "
+        "existe próxima página (`has_next`). Para avançar, chame novamente com "
+        "`page + 1`; para voltar, com `page - 1` (`has_previous` indica se há página "
+        "anterior). Não há retorno do total de registros.\n\n"
         "### Filtros dinâmicos (`filters`)\n"
         "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
         "- `column` (obrigatório): nome da coluna (ex: `E5_VALOR`).\n"
@@ -235,9 +265,9 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
         "```\n"
         "GET /api/query-json"
         "?table=SE5"
-        "&fields=E5_FILIAL,E5_NUM,E5_DATA,E5_VALOR"
+        "&fields=E5_FILIAL,E5_NUMERO,E5_DATA,E5_VALOR"
         "&filters=" + '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-        '{"column":"E5_NUM","operator":"comeca com","value":"0001"},'
+        '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"},'
         '{"column":"E5_DATA","operator":"entre","value":["2025-01-01","2025-01-31"],"type":"date"}]'
         + "&page=1"
         "&pagesize=50"
@@ -251,13 +281,13 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
             "in": "query",
             "required": True,
             "schema": {"type": "string", "example": "SE5"},
-            "description": "Nome da tabela no Protheus (ex: SE5, SA1, SB1)",
+            "description": "Alias da tabela no Protheus (ex: SE5, SA1, SB1)",
         },
         {
             "name": "fields",
             "in": "query",
             "required": True,
-            "schema": {"type": "string", "example": "E5_FILIAL,E5_NUM,E5_DATA,E5_VALOR"},
+            "schema": {"type": "string", "example": "E5_FILIAL,E5_NUMERO,E5_DATA,E5_VALOR"},
             "description": "Colunas desejadas separadas por vírgula",
         },
         {
@@ -268,7 +298,7 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
                 "type": "string",
                 "example": (
                     '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-                    '{"column":"E5_NUM","operator":"comeca com","value":"0001"}]'
+                    '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"}]'
                 ),
             },
             "description": (
@@ -300,15 +330,15 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
                 "application/json": {
                     "schema": inline_refs(QueryResponse.model_json_schema()),
                     "example": {
-                        "total": 137,
-                        "has_next": True,
                         "page": 1,
                         "pagesize": 50,
+                        "has_next": True,
+                        "has_previous": False,
                         "items": [
                             {
                                 "e5_filial": "01",
-                                "e5_num": "000001",
-                                "e5_data": "20250115",
+                                "e5_numero": "000001",
+                                "e5_data": "2025-01-15",
                                 "e5_valor": 1500.0,
                             },
                         ],
@@ -362,7 +392,7 @@ def _parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
 @require_roles("Tables.Read")
 def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
-    table = req.params.get("table", "").strip()
+    table = req.params.get("table", "").strip().upper()
     fields = req.params.get("fields", "").strip()
     filters_raw = req.params.get("filters", "").strip()
 
@@ -370,6 +400,13 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
     if missing:
         return func.HttpResponse(
             json.dumps({"error": f"Parâmetros obrigatórios ausentes: {', '.join(missing)}"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    if not _TABLE_RE.match(table):
+        return func.HttpResponse(
+            json.dumps({"error": f"Alias de tabela inválido: '{table}'"}),
             status_code=400,
             mimetype="application/json",
         )
@@ -385,7 +422,7 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     pagesize = min(pagesize, _MAX_PAGESIZE)
 
-    where_parts = [f"{table}.D_E_L_E_T_=' '"]
+    where_parts = ["R_E_C_N_O_ > 0", "D_E_L_E_T_ <> '*'"]
 
     if filters_raw:
         conditions, err = _parse_filters(filters_raw)
@@ -397,27 +434,33 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             )
         where_parts.extend(conditions)
 
-    query_params: dict[str, str] = {
-        "tables": table,
-        "fields": fields,
-        "where": " AND ".join(where_parts),
-        "page": str(page),
-        "pagesize": str(pagesize),
-    }
+    physical_table = f"{table}{_TABLE_SUFFIX}"
+
+    # Busca pagesize+1 linhas: a extra indica se há próxima página,
+    # mas somente pagesize registros são devolvidos ao usuário.
+    from_qry = _FROM_QRY_TEMPLATE.format(
+        table=physical_table,
+        where=" AND ".join(where_parts),
+        offset=(page - 1) * pagesize,
+        rows=pagesize + 1,
+        alias=table,
+    )
 
     headers = {
-        "FilialFilter": "false"
+        "tables": table,
+        "fields": fields,
+        "pagesize": str(pagesize + 1),
+        "FromQry": from_qry,
+        "FilialFilter": "false",
     }
 
     try:
         resp = requests.get(
             f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",
-            params=query_params,
             auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
             timeout=60*10,
-            headers=headers
+            headers=headers,
         )
-        resp.raise_for_status()
     except requests.RequestException as exc:
         logging.error("Protheus queryJson failed: %s", exc)
         return func.HttpResponse(
@@ -426,11 +469,30 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
+    if resp.status_code >= 400:
+        # Causa comum de 500 no Protheus: coluna inexistente em 'filters'
+        # (em 'fields' o Protheus apenas ignora a coluna).
+        logging.error(
+            "Protheus queryJson erro HTTP %s: %.500s", resp.status_code, resp.text
+        )
+        return func.HttpResponse(
+            json.dumps(
+                {
+                    "error": (
+                        f"Protheus retornou erro HTTP {resp.status_code}. "
+                        "Verifique se as colunas usadas em 'filters' existem na tabela."
+                    )
+                }
+            ),
+            status_code=502,
+            mimetype="application/json",
+        )
+
     try:
         data = resp.json()
     except ValueError:
         # Protheus respondeu algo que não é JSON (corpo vazio, HTML de erro, etc.).
-        # Causa comum: URL longa demais (muitas colunas em 'fields') ou campo inválido.
+        # Causa comum: muitos campos em 'fields' ou campo inválido.
         logging.error(
             "Protheus queryJson retornou resposta não-JSON (status=%s): %.500s",
             resp.status_code,
@@ -446,12 +508,15 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
 
     items: list[dict[str, Any]] = data.get("items", [])
 
+    has_next = len(items) > pagesize
+    items = items[:pagesize]
+
     return func.HttpResponse(
         QueryResponse(
-            total=int(data.get("total", 0)),
-            has_next=bool(data.get("hasNext", False)),
             page=page,
             pagesize=pagesize,
+            has_next=has_next,
+            has_previous=page > 1,
             items=items,
         ).model_dump_json(),
         status_code=200,
