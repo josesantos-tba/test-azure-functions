@@ -4,6 +4,7 @@ import pathlib
 import azure.functions as func
 from pydantic import BaseModel
 from azure_functions_openapi import ( get_openapi_json, openapi, render_swagger_ui )
+from src.blueprints.protheus_export_csv import bp as protheus_export_csv_bp
 from src.blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
 from src.blueprints.protheus_list_tables import bp as protheus_list_tables_bp
 from src.blueprints.protheus_query_json import bp as protheus_query_json_bp
@@ -22,6 +23,7 @@ _OPENAPI_DESCRIPTION = (
 )
 
 app = func.FunctionApp()
+app.register_functions(protheus_export_csv_bp)
 app.register_functions(protheus_get_table_columns_bp)
 app.register_functions(protheus_list_tables_bp)
 app.register_functions(protheus_query_json_bp)
