@@ -31,41 +31,39 @@ _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # Sufixo padrão que converte o alias (ex: CTK) no nome físico (ex: CTK010).
 _TABLE_SUFFIX = "010"
 
-# FromQry com o WHERE (cursor de recno, deleção e filtros dinâmicos) embutido
-# na subquery, sem usar o parâmetro 'where' do Protheus. Ordena por
-# R_E_C_N_O_ DESC para os registros mais recentes virem primeiro.
+# FromQry único (página + cursores em uma só chamada à genericQuery), com o
+# WHERE (cursor de recno, deleção e filtros dinâmicos) embutido na subquery,
+# sem usar o parâmetro 'where' do Protheus. Ordena por R_E_C_N_O_ DESC para
+# os registros mais recentes virem primeiro e busca pagesize+1 linhas para
+# saber se há próxima página.
+#
+# Como o Protheus não retorna a coluna R_E_C_N_O_ nos itens, cada linha
+# carrega o próprio R_E_C_N_O_ numa coluna numérica "emprestada" de outra
+# tabela padrão (ex: A10_PRAZO — numérica, sem truncamento) e o escalar do
+# previous_recno em outra (ex: E5_VALOR). A genericQuery aceita múltiplos
+# aliases em 'tables' separados por vírgula, o que permite pedir em 'fields'
+# colunas dessas tabelas junto com as da tabela consultada.
 _FROM_QRY_TEMPLATE = (
-    "(SELECT * FROM {table} WHERE {where} "
-    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {rows} ROWS ONLY) {alias}"
+    "(SELECT T.*, T.R_E_C_N_O_ AS {recno_col}, {prev_expr} AS {prev_col} "
+    "FROM {table} T WHERE {where} "
+    "ORDER BY T.R_E_C_N_O_ DESC FETCH NEXT {rows} ROWS ONLY) {alias}"
 )
 
-# FromQry de cursores (mesmo artifício da A10 usado no table-count): como o
-# Protheus não retorna a coluna R_E_C_N_O_ nos itens, uma segunda chamada
-# devolve 4 linhas, cada uma carregando um escalar em A10_PRAZO (numérico,
-# sem truncamento), identificado pela tag em A10_ETAPA:
-#   '1' = menor R_E_C_N_O_ da página atual (candidato a next_recno)
-#   '2' = qtde de registros da janela pagesize+1 (indica se há próxima página)
-#   '3' = qtde de registros acima do cursor (limitada a pagesize)
-#   '4' = maior R_E_C_N_O_ da janela acima do cursor (candidato a previous_recno)
-_CURSORS_FROM_QRY_TEMPLATE = (
-    "(SELECT '' AS A10_FILIAL,'' AS A10_CJETAP,'1' AS A10_ETAPA,'' AS A10_ETDESC,"
-    "'' AS A10_WKFLOW,"
-    "(SELECT MIN(R_E_C_N_O_) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_page} "
-    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {pagesize} ROWS ONLY)) AS A10_PRAZO,"
-    "1 AS R_E_C_N_O_,0 AS R_E_C_D_E_L_,' ' AS D_E_L_E_T_ FROM DUAL"
-    " UNION ALL SELECT '','','2','','',"
-    "(SELECT COUNT(*) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_page} "
-    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {rows_next} ROWS ONLY)),"
-    "2,0,' ' FROM DUAL"
-    " UNION ALL SELECT '','','3','','',"
-    "(SELECT COUNT(*) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_above} "
-    "ORDER BY R_E_C_N_O_ ASC FETCH NEXT {pagesize} ROWS ONLY)),"
-    "3,0,' ' FROM DUAL"
-    " UNION ALL SELECT '','','4','','',"
-    "(SELECT MAX(R_E_C_N_O_) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_above} "
-    "ORDER BY R_E_C_N_O_ ASC FETCH NEXT {pagesize} ROWS ONLY)),"
-    "4,0,' ' FROM DUAL) A10"
+# Escalar do previous_recno: o pagesize-ésimo R_E_C_N_O_ acima do cursor.
+# Não retorna linha (vira NULL na coluna) quando há menos de pagesize
+# registros acima — nesse caso a página anterior é a primeira (cursor 0).
+_PREV_EXPR_TEMPLATE = (
+    "(SELECT MAX(R_E_C_N_O_) FROM ("
+    "SELECT R_E_C_N_O_ FROM {table} WHERE {where_above} "
+    "ORDER BY R_E_C_N_O_ ASC FETCH NEXT {pagesize} ROWS ONLY) "
+    "HAVING COUNT(*) >= {pagesize})"
 )
+
+# Colunas numéricas de tabelas padrão do Protheus usadas como "carona" para
+# o R_E_C_N_O_ de cada linha e para o escalar do previous_recno. São usadas
+# as duas primeiras cuja tabela difere da consultada, para não colidir com
+# as colunas reais quando a própria A10/SE5 for consultada.
+_SENTINEL_COLUMNS = [("A10", "A10_PRAZO"), ("SE5", "E5_VALOR"), ("SE2", "E2_VALOR")]
 
 _ERROR_SCHEMA = {
     "type": "object",
@@ -119,39 +117,6 @@ def _to_int(value: Any) -> int | None:
         return int(float(text))
     except (TypeError, ValueError):
         return None
-
-
-def _compute_cursors(
-    recno: int, pagesize: int, rows: list[dict[str, Any]]
-) -> tuple[int | None, int | None]:
-    """Calcula ``(previous_recno, next_recno)`` a partir das linhas de cursores.
-
-    ``rows`` são os items da chamada de cursores: cada linha tem a tag em
-    ``a10_etapa`` e o valor em ``a10_prazo`` (ver _CURSORS_FROM_QRY_TEMPLATE).
-    """
-    values: dict[str, Any] = {}
-    for row in rows:
-        values[str(row.get("a10_etapa", "")).strip()] = row.get("a10_prazo")
-
-    page_min = _to_int(values.get("1"))
-    window_count = _to_int(values.get("2")) or 0
-    count_above = _to_int(values.get("3")) or 0
-    above_max = _to_int(values.get("4"))
-
-    # Há próxima página se a janela pagesize+1 veio cheia; o cursor é o menor
-    # recno da página atual (a próxima página são os registros abaixo dele).
-    next_recno = page_min if window_count == pagesize + 1 else None
-
-    if recno == 0:
-        # Primeira página: não há anterior.
-        previous_recno = None
-    elif count_above >= pagesize and above_max is not None:
-        # O cursor da página anterior é o pagesize-ésimo recno acima do atual.
-        previous_recno = above_max
-    else:
-        # Menos de pagesize registros acima: a anterior é a primeira página.
-        previous_recno = 0
-    return previous_recno, next_recno
 
 
 def _protheus_query(
@@ -219,16 +184,25 @@ def _protheus_query(
         "e retorna os dados em **JSON**.\n\n"
         "A tabela é informada pelo **alias** (ex: `CTK`, `SB1`); o nome físico é montado "
         f"com o sufixo `{_TABLE_SUFFIX}` (ex: `CTK` → `CTK{_TABLE_SUFFIX}`).\n\n"
-        "Internamente a genericQuery é chamada com os parâmetros no **header** — o WHERE "
-        "(cursor de recno, deleção e filtros) fica embutido no `FromQry`, sem usar o "
-        "parâmetro `where` do Protheus. Exemplo de segunda página:\n"
+        "Internamente a genericQuery é chamada **uma única vez** com os parâmetros no "
+        "**header** — o WHERE (cursor de recno, deleção e filtros) fica embutido no "
+        "`FromQry`, sem usar o parâmetro `where` do Protheus. Como a genericQuery aceita "
+        "múltiplos aliases em `tables`, dados e cursores de paginação vêm na mesma "
+        "resposta: cada linha carrega o próprio `R_E_C_N_O_` na coluna emprestada "
+        "`A10_PRAZO` e o cursor da página anterior em `E5_VALOR` (colunas numéricas de "
+        "tabelas padrão, removidas dos itens antes da resposta). Exemplo de segunda página:\n"
         "```\n"
-        "tables=CTK\n"
-        "fields=CTK_FILIAL,CTK_CODFOR,CTK_CODCLI,CTK_SEQUEN\n"
-        "pagesize=50\n"
-        f"FromQry=(SELECT * FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ < 21410710 AND "
-        "D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ DESC FETCH NEXT 50 ROWS ONLY) CTK\n"
+        "tables=CTK,A10,SE5\n"
+        "fields=CTK_FILIAL,CTK_CODFOR,CTK_CODCLI,CTK_SEQUEN,A10_PRAZO,E5_VALOR\n"
+        "pagesize=51\n"
+        f"FromQry=(SELECT T.*, T.R_E_C_N_O_ AS A10_PRAZO, (SELECT MAX(R_E_C_N_O_) FROM "
+        f"(SELECT R_E_C_N_O_ FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ > 21410710 AND "
+        "D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ ASC FETCH NEXT 50 ROWS ONLY) HAVING "
+        f"COUNT(*) >= 50) AS E5_VALOR FROM CTK{_TABLE_SUFFIX} T WHERE "
+        "R_E_C_N_O_ < 21410710 AND D_E_L_E_T_ <> '*' ORDER BY T.R_E_C_N_O_ DESC "
+        "FETCH NEXT 51 ROWS ONLY) CTK\n"
         "FilialFilter=false\n"
+        "DeletedFilter=false\n"
         "```\n\n"
         "### Paginação (recno + pagesize)\n"
         "Os registros vêm ordenados por `R_E_C_N_O_` **decrescente** — os mais recentes "
@@ -239,9 +213,10 @@ def _protheus_query(
         "- `previous_recno`: informe em `recno` para **voltar** à página anterior "
         "(registros mais recentes). `0` indica que a anterior é a primeira página; "
         "`null` indica que esta já é a primeira.\n\n"
-        "Como o Protheus não retorna a coluna `R_E_C_N_O_` nos itens, os cursores são "
-        "calculados em uma segunda chamada à genericQuery com o mesmo artifício da "
-        "tabela `A10` usado no `table-count`. Não há retorno do total de registros — "
+        "Como o Protheus não retorna a coluna `R_E_C_N_O_` nos itens, o recno de cada "
+        "linha viaja numa coluna numérica emprestada de outra tabela (artifício parecido "
+        "com o da `A10` usado no `table-count`), o que permite calcular os cursores sem "
+        "uma segunda chamada. Não há retorno do total de registros — "
         "use o endpoint `table-count` (com os mesmos `filters`) se precisar do total.\n\n"
         "### Filtros dinâmicos (`filters`)\n"
         "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
@@ -428,55 +403,67 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
     # Janela acima do cursor: usada para calcular o previous_recno.
     where_above = " AND ".join([f"R_E_C_N_O_ > {recno}", *base_conditions])
 
+    # Colunas "emprestadas" que carregam o recno de cada linha e o escalar do
+    # previous_recno (só calculado quando não é a primeira página).
+    (recno_table, recno_col), (prev_table, prev_col) = [
+        pair for pair in _SENTINEL_COLUMNS if pair[0] != table
+    ][:2]
+    prev_expr = (
+        _PREV_EXPR_TEMPLATE.format(
+            table=physical_table, where_above=where_above, pagesize=pagesize
+        )
+        if recno
+        else "0"
+    )
+
     data, error_response = _protheus_query(
         {
-            "tables": table,
-            "fields": fields,
-            "pagesize": str(pagesize),
+            "tables": f"{table},{recno_table},{prev_table}",
+            "fields": f"{fields},{recno_col},{prev_col}",
+            # Uma linha a mais que a página para saber se há próxima página.
+            "pagesize": str(pagesize + 1),
             "FromQry": _FROM_QRY_TEMPLATE.format(
-                table=physical_table, where=where_page, rows=pagesize, alias=table
+                table=physical_table,
+                where=where_page,
+                rows=pagesize + 1,
+                alias=table,
+                recno_col=recno_col,
+                prev_col=prev_col,
+                prev_expr=prev_expr,
             ),
             "FilialFilter": "false",
+            # O filtro automático de deleção qualificaria D_E_L_E_T_ também nos
+            # aliases das tabelas emprestadas (inexistentes no FromQry); a
+            # condição já está embutida em where_page.
+            "DeletedFilter": "false",
         }
     )
     if error_response is not None:
         return error_response
 
-    items: list[dict[str, Any]] = data.get("items", [])[:pagesize]
+    recno_key, prev_key = recno_col.lower(), prev_col.lower()
+    rows: list[dict[str, Any]] = data.get("items", [])
+    rows.sort(key=lambda row: _to_int(row.get(recno_key)) or 0, reverse=True)
+    page_rows = rows[:pagesize]
 
-    if recno == 0 and len(items) < pagesize:
-        # Primeira página incompleta: não existem outras páginas.
+    # Há próxima página se a janela pagesize+1 veio cheia; o cursor é o menor
+    # recno da página atual (a próxima página são os registros abaixo dele).
+    next_recno: int | None = None
+    if len(rows) > pagesize and page_rows:
+        next_recno = _to_int(page_rows[-1].get(recno_key))
+
+    if recno == 0:
+        # Primeira página: não há anterior.
         previous_recno: int | None = None
-        next_recno: int | None = None
     else:
-        cursors_data, error_response = _protheus_query(
-            {
-                "tables": "A10",
-                "fields": "A10_ETAPA,A10_PRAZO",
-                "pagesize": "4",
-                "FromQry": _CURSORS_FROM_QRY_TEMPLATE.format(
-                    table=physical_table,
-                    where_page=where_page,
-                    where_above=where_above,
-                    pagesize=pagesize,
-                    rows_next=pagesize + 1,
-                ),
-                "FilialFilter": "false",
-            }
-        )
-        if error_response is not None:
-            return error_response
+        # O escalar (repetido em todas as linhas) é o pagesize-ésimo recno
+        # acima do cursor; NULL quando a anterior é a primeira página.
+        previous_recno = (_to_int(page_rows[0].get(prev_key)) if page_rows else None) or 0
 
-        cursor_rows = cursors_data.get("items", [])
-        if not cursor_rows:
-            logging.error("Protheus queryJson sem as linhas de cursores de paginação")
-            return func.HttpResponse(
-                json.dumps({"error": "Resposta do Protheus sem os cursores de paginação."}),
-                status_code=502,
-                mimetype="application/json",
-            )
-
-        previous_recno, next_recno = _compute_cursors(recno, pagesize, cursor_rows)
+    items = [
+        {k: v for k, v in row.items() if k not in (recno_key, prev_key)}
+        for row in page_rows
+    ]
 
     return func.HttpResponse(
         QueryResponse(
