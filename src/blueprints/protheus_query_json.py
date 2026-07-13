@@ -31,13 +31,40 @@ _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # Sufixo padrão que converte o alias (ex: CTK) no nome físico (ex: CTK010).
 _TABLE_SUFFIX = "010"
 
-# FromQry com o WHERE (deleção e filtros dinâmicos) embutido na subquery,
-# sem usar o parâmetro 'where' do Protheus. A paginação é feita por
-# OFFSET/FETCH sobre R_E_C_N_O_: busca-se pagesize+1 linhas e a linha extra
-# indica se há próxima página (o Protheus não retorna a coluna R_E_C_N_O_).
+# FromQry com o WHERE (cursor de recno, deleção e filtros dinâmicos) embutido
+# na subquery, sem usar o parâmetro 'where' do Protheus. Ordena por
+# R_E_C_N_O_ DESC para os registros mais recentes virem primeiro.
 _FROM_QRY_TEMPLATE = (
     "(SELECT * FROM {table} WHERE {where} "
-    "ORDER BY R_E_C_N_O_ ASC OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY) {alias}"
+    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {rows} ROWS ONLY) {alias}"
+)
+
+# FromQry de cursores (mesmo artifício da A10 usado no table-count): como o
+# Protheus não retorna a coluna R_E_C_N_O_ nos itens, uma segunda chamada
+# devolve 4 linhas, cada uma carregando um escalar em A10_PRAZO (numérico,
+# sem truncamento), identificado pela tag em A10_ETAPA:
+#   '1' = menor R_E_C_N_O_ da página atual (candidato a next_recno)
+#   '2' = qtde de registros da janela pagesize+1 (indica se há próxima página)
+#   '3' = qtde de registros acima do cursor (limitada a pagesize)
+#   '4' = maior R_E_C_N_O_ da janela acima do cursor (candidato a previous_recno)
+_CURSORS_FROM_QRY_TEMPLATE = (
+    "(SELECT '' AS A10_FILIAL,'' AS A10_CJETAP,'1' AS A10_ETAPA,'' AS A10_ETDESC,"
+    "'' AS A10_WKFLOW,"
+    "(SELECT MIN(R_E_C_N_O_) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_page} "
+    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {pagesize} ROWS ONLY)) AS A10_PRAZO,"
+    "1 AS R_E_C_N_O_,0 AS R_E_C_D_E_L_,' ' AS D_E_L_E_T_ FROM DUAL"
+    " UNION ALL SELECT '','','2','','',"
+    "(SELECT COUNT(*) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_page} "
+    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {rows_next} ROWS ONLY)),"
+    "2,0,' ' FROM DUAL"
+    " UNION ALL SELECT '','','3','','',"
+    "(SELECT COUNT(*) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_above} "
+    "ORDER BY R_E_C_N_O_ ASC FETCH NEXT {pagesize} ROWS ONLY)),"
+    "3,0,' ' FROM DUAL"
+    " UNION ALL SELECT '','','4','','',"
+    "(SELECT MAX(R_E_C_N_O_) FROM (SELECT R_E_C_N_O_ FROM {table} WHERE {where_above} "
+    "ORDER BY R_E_C_N_O_ ASC FETCH NEXT {pagesize} ROWS ONLY)),"
+    "4,0,' ' FROM DUAL) A10"
 )
 
 _ERROR_SCHEMA = {
@@ -48,13 +75,24 @@ _ERROR_SCHEMA = {
 
 
 class QueryResponse(BaseModel):
-    page: int = Field(description="Página retornada (começa em 1).")
     pagesize: int = Field(description="Registros por página.")
-    has_next: bool = Field(description="Indica se há uma próxima página.")
-    has_previous: bool = Field(description="Indica se há uma página anterior.")
+    previous_recno: int | None = Field(
+        description=(
+            "Valor de `recno` para buscar a página anterior (registros mais recentes). "
+            "`0` indica que a anterior é a primeira página; `null` indica que esta já "
+            "é a primeira página."
+        )
+    )
+    next_recno: int | None = Field(
+        description=(
+            "Valor de `recno` para buscar a próxima página (registros mais antigos). "
+            "`null` quando não há próxima página."
+        )
+    )
     items: list[dict[str, Any]] = Field(
         description=(
-            "Registros retornados. Cada item é um objeto dinâmico cujas chaves "
+            "Registros retornados, ordenados do mais recente para o mais antigo "
+            "(R_E_C_N_O_ decrescente). Cada item é um objeto dinâmico cujas chaves "
             "correspondem às colunas pedidas em `fields` (em minúsculas) e os valores "
             "podem ser de qualquer tipo (string, número, etc.) conforme o campo no Protheus."
         )
@@ -72,31 +110,139 @@ def _parse_int(value: str, default: int) -> int | None:
         return None
 
 
+def _to_int(value: Any) -> int | None:
+    """Converte um valor vindo do Protheus (número, string ou vazio) em int, ou ``None``."""
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_cursors(
+    recno: int, pagesize: int, rows: list[dict[str, Any]]
+) -> tuple[int | None, int | None]:
+    """Calcula ``(previous_recno, next_recno)`` a partir das linhas de cursores.
+
+    ``rows`` são os items da chamada de cursores: cada linha tem a tag em
+    ``a10_etapa`` e o valor em ``a10_prazo`` (ver _CURSORS_FROM_QRY_TEMPLATE).
+    """
+    values: dict[str, Any] = {}
+    for row in rows:
+        values[str(row.get("a10_etapa", "")).strip()] = row.get("a10_prazo")
+
+    page_min = _to_int(values.get("1"))
+    window_count = _to_int(values.get("2")) or 0
+    count_above = _to_int(values.get("3")) or 0
+    above_max = _to_int(values.get("4"))
+
+    # Há próxima página se a janela pagesize+1 veio cheia; o cursor é o menor
+    # recno da página atual (a próxima página são os registros abaixo dele).
+    next_recno = page_min if window_count == pagesize + 1 else None
+
+    if recno == 0:
+        # Primeira página: não há anterior.
+        previous_recno = None
+    elif count_above >= pagesize and above_max is not None:
+        # O cursor da página anterior é o pagesize-ésimo recno acima do atual.
+        previous_recno = above_max
+    else:
+        # Menos de pagesize registros acima: a anterior é a primeira página.
+        previous_recno = 0
+    return previous_recno, next_recno
+
+
+def _protheus_query(
+    headers: dict[str, str],
+) -> tuple[dict[str, Any] | None, func.HttpResponse | None]:
+    """Chama a genericQuery com os ``headers`` informados.
+
+    Retorna ``(json, None)`` em caso de sucesso ou ``(None, resposta_de_erro)``.
+    """
+    try:
+        resp = requests.get(
+            f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",
+            auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
+            timeout=60 * 10,
+            headers=headers,
+        )
+    except requests.RequestException as exc:
+        logging.error("Protheus queryJson failed: %s", exc)
+        return None, func.HttpResponse(
+            json.dumps({"error": "Falha ao conectar à API do Protheus"}),
+            status_code=502,
+            mimetype="application/json",
+        )
+
+    if resp.status_code >= 400:
+        # Causa comum de 500 no Protheus: coluna inexistente em 'filters'
+        # (em 'fields' o Protheus apenas ignora a coluna).
+        logging.error(
+            "Protheus queryJson erro HTTP %s: %.500s", resp.status_code, resp.text
+        )
+        return None, func.HttpResponse(
+            json.dumps(
+                {
+                    "error": (
+                        f"Protheus retornou erro HTTP {resp.status_code}. "
+                        "Verifique se as colunas usadas em 'filters' existem na tabela."
+                    )
+                }
+            ),
+            status_code=502,
+            mimetype="application/json",
+        )
+
+    try:
+        return resp.json(), None
+    except ValueError:
+        logging.error(
+            "Protheus queryJson retornou resposta não-JSON (status=%s): %.500s",
+            resp.status_code,
+            resp.text,
+        )
+        return None, func.HttpResponse(
+            json.dumps(
+                {"error": "Resposta inválida do Protheus (não-JSON). Verifique os campos e o tamanho da consulta."}
+            ),
+            status_code=502,
+            mimetype="application/json",
+        )
+
+
 @openapi(
-    summary="Consulta em tabela do Protheus (JSON) com filtros dinâmicos",
+    summary="Consulta em tabela do Protheus (JSON) com paginação por recno e filtros dinâmicos",
     description=(
         "Executa uma consulta parametrizável em qualquer tabela do Protheus via **genericQuery** "
         "e retorna os dados em **JSON**.\n\n"
         "A tabela é informada pelo **alias** (ex: `CTK`, `SB1`); o nome físico é montado "
         f"com o sufixo `{_TABLE_SUFFIX}` (ex: `CTK` → `CTK{_TABLE_SUFFIX}`).\n\n"
         "Internamente a genericQuery é chamada com os parâmetros no **header** — o WHERE "
-        "(deleção e filtros) fica embutido no `FromQry`, sem usar o parâmetro "
-        "`where` do Protheus:\n"
+        "(cursor de recno, deleção e filtros) fica embutido no `FromQry`, sem usar o "
+        "parâmetro `where` do Protheus. Exemplo de segunda página:\n"
         "```\n"
         "tables=CTK\n"
         "fields=CTK_FILIAL,CTK_CODFOR,CTK_CODCLI,CTK_SEQUEN\n"
         "pagesize=50\n"
-        f"FromQry=(SELECT * FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ > 0 AND "
-        "D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ ASC OFFSET 0 ROWS "
-        "FETCH NEXT 51 ROWS ONLY) CTK\n"
+        f"FromQry=(SELECT * FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ < 21410710 AND "
+        "D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ DESC FETCH NEXT 50 ROWS ONLY) CTK\n"
         "FilialFilter=false\n"
         "```\n\n"
-        "### Paginação (page + pagesize)\n"
-        "A subquery busca sempre `pagesize + 1` registros (ex: 51 para `pagesize=50`), "
-        "mas somente `pagesize` são devolvidos ao usuário — o registro extra indica se "
-        "existe próxima página (`has_next`). Para avançar, chame novamente com "
-        "`page + 1`; para voltar, com `page - 1` (`has_previous` indica se há página "
-        "anterior). Não há retorno do total de registros.\n\n"
+        "### Paginação (recno + pagesize)\n"
+        "Os registros vêm ordenados por `R_E_C_N_O_` **decrescente** — os mais recentes "
+        "aparecem primeiro. A primeira página usa `recno=0` (padrão); as demais usam os "
+        "cursores devolvidos na resposta:\n"
+        "- `next_recno`: informe em `recno` para buscar a **próxima** página (registros "
+        "mais antigos). `null` quando não há próxima página.\n"
+        "- `previous_recno`: informe em `recno` para **voltar** à página anterior "
+        "(registros mais recentes). `0` indica que a anterior é a primeira página; "
+        "`null` indica que esta já é a primeira.\n\n"
+        "Como o Protheus não retorna a coluna `R_E_C_N_O_` nos itens, os cursores são "
+        "calculados em uma segunda chamada à genericQuery com o mesmo artifício da "
+        "tabela `A10` usado no `table-count`. Não há retorno do total de registros — "
+        "use o endpoint `table-count` (com os mesmos `filters`) se precisar do total.\n\n"
         "### Filtros dinâmicos (`filters`)\n"
         "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
         "- `column` (obrigatório): nome da coluna (ex: `E5_VALOR`).\n"
@@ -115,7 +261,7 @@ def _parse_int(value: str, default: int) -> int | None:
         "&filters=" + '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
         '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"},'
         '{"column":"E5_DATA","operator":"entre","value":["2025-01-01","2025-01-31"],"type":"date"}]'
-        + "&page=1"
+        + "&recno=0"
         "&pagesize=50"
         "```"
     ),
@@ -141,11 +287,14 @@ def _parse_int(value: str, default: int) -> int | None:
             '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"}]'
         ),
         {
-            "name": "page",
+            "name": "recno",
             "in": "query",
             "required": False,
-            "schema": {"type": "integer", "default": 1, "example": 1},
-            "description": "Número da página a retornar (começa em 1)",
+            "schema": {"type": "integer", "default": 0, "example": 0},
+            "description": (
+                "Cursor de paginação: use 0 (padrão) para a primeira página e o "
+                "`next_recno`/`previous_recno` da resposta anterior para navegar."
+            ),
         },
         {
             "name": "pagesize",
@@ -162,10 +311,9 @@ def _parse_int(value: str, default: int) -> int | None:
                 "application/json": {
                     "schema": inline_refs(QueryResponse.model_json_schema()),
                     "example": {
-                        "page": 1,
                         "pagesize": 50,
-                        "has_next": True,
-                        "has_previous": False,
+                        "previous_recno": 0,
+                        "next_recno": 123406,
                         "items": [
                             {
                                 "e5_filial": "01",
@@ -243,18 +391,24 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    page = _parse_int(req.params.get("page", ""), 1)
+    recno = _parse_int(req.params.get("recno", ""), 0)
     pagesize = _parse_int(req.params.get("pagesize", ""), _DEFAULT_PAGESIZE)
-    if page is None or pagesize is None or page < 1 or pagesize < 1:
+    if recno is None or recno < 0:
         return func.HttpResponse(
-            json.dumps({"error": "'page' e 'pagesize' devem ser inteiros >= 1"}),
+            json.dumps({"error": "'recno' deve ser um inteiro >= 0"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if pagesize is None or pagesize < 1:
+        return func.HttpResponse(
+            json.dumps({"error": "'pagesize' deve ser um inteiro >= 1"}),
             status_code=400,
             mimetype="application/json",
         )
 
     pagesize = min(pagesize, _MAX_PAGESIZE)
 
-    where_parts = ["R_E_C_N_O_ > 0", "D_E_L_E_T_ <> '*'"]
+    base_conditions = ["D_E_L_E_T_ <> '*'"]
 
     if filters_raw:
         conditions, err = parse_filters(filters_raw)
@@ -264,91 +418,71 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400,
                 mimetype="application/json",
             )
-        where_parts.extend(conditions)
+        base_conditions.extend(conditions)
 
     physical_table = f"{table}{_TABLE_SUFFIX}"
 
-    # Busca pagesize+1 linhas: a extra indica se há próxima página,
-    # mas somente pagesize registros são devolvidos ao usuário.
-    from_qry = _FROM_QRY_TEMPLATE.format(
-        table=physical_table,
-        where=" AND ".join(where_parts),
-        offset=(page - 1) * pagesize,
-        rows=pagesize + 1,
-        alias=table,
+    # Página atual: registros abaixo do cursor (ou do topo, na primeira página).
+    page_bound = f"R_E_C_N_O_ < {recno}" if recno else "R_E_C_N_O_ > 0"
+    where_page = " AND ".join([page_bound, *base_conditions])
+    # Janela acima do cursor: usada para calcular o previous_recno.
+    where_above = " AND ".join([f"R_E_C_N_O_ > {recno}", *base_conditions])
+
+    data, error_response = _protheus_query(
+        {
+            "tables": table,
+            "fields": fields,
+            "pagesize": str(pagesize),
+            "FromQry": _FROM_QRY_TEMPLATE.format(
+                table=physical_table, where=where_page, rows=pagesize, alias=table
+            ),
+            "FilialFilter": "false",
+        }
     )
+    if error_response is not None:
+        return error_response
 
-    headers = {
-        "tables": table,
-        "fields": fields,
-        "pagesize": str(pagesize + 1),
-        "FromQry": from_qry,
-        "FilialFilter": "false",
-    }
+    items: list[dict[str, Any]] = data.get("items", [])[:pagesize]
 
-    try:
-        resp = requests.get(
-            f"{_PROTHEUS_BASE_URL}/api/framework/v1/genericQuery",
-            auth=_PROTHEUS_AUTH if all(_PROTHEUS_AUTH) else None,
-            timeout=60*10,
-            headers=headers,
+    if recno == 0 and len(items) < pagesize:
+        # Primeira página incompleta: não existem outras páginas.
+        previous_recno: int | None = None
+        next_recno: int | None = None
+    else:
+        cursors_data, error_response = _protheus_query(
+            {
+                "tables": "A10",
+                "fields": "A10_ETAPA,A10_PRAZO",
+                "pagesize": "4",
+                "FromQry": _CURSORS_FROM_QRY_TEMPLATE.format(
+                    table=physical_table,
+                    where_page=where_page,
+                    where_above=where_above,
+                    pagesize=pagesize,
+                    rows_next=pagesize + 1,
+                ),
+                "FilialFilter": "false",
+            }
         )
-    except requests.RequestException as exc:
-        logging.error("Protheus queryJson failed: %s", exc)
-        return func.HttpResponse(
-            json.dumps({"error": "Falha ao conectar à API do Protheus"}),
-            status_code=502,
-            mimetype="application/json",
-        )
+        if error_response is not None:
+            return error_response
 
-    if resp.status_code >= 400:
-        # Causa comum de 500 no Protheus: coluna inexistente em 'filters'
-        # (em 'fields' o Protheus apenas ignora a coluna).
-        logging.error(
-            "Protheus queryJson erro HTTP %s: %.500s", resp.status_code, resp.text
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "error": (
-                        f"Protheus retornou erro HTTP {resp.status_code}. "
-                        "Verifique se as colunas usadas em 'filters' existem na tabela."
-                    )
-                }
-            ),
-            status_code=502,
-            mimetype="application/json",
-        )
+        cursor_rows = cursors_data.get("items", [])
+        if not cursor_rows:
+            logging.error("Protheus queryJson sem as linhas de cursores de paginação")
+            return func.HttpResponse(
+                json.dumps({"error": "Resposta do Protheus sem os cursores de paginação."}),
+                status_code=502,
+                mimetype="application/json",
+            )
 
-    try:
-        data = resp.json()
-    except ValueError:
-        # Protheus respondeu algo que não é JSON (corpo vazio, HTML de erro, etc.).
-        # Causa comum: muitos campos em 'fields' ou campo inválido.
-        logging.error(
-            "Protheus queryJson retornou resposta não-JSON (status=%s): %.500s",
-            resp.status_code,
-            resp.text,
-        )
-        return func.HttpResponse(
-            json.dumps(
-                {"error": "Resposta inválida do Protheus (não-JSON). Verifique os campos e o tamanho da consulta."}
-            ),
-            status_code=502,
-            mimetype="application/json",
-        )
-
-    items: list[dict[str, Any]] = data.get("items", [])
-
-    has_next = len(items) > pagesize
-    items = items[:pagesize]
+        previous_recno, next_recno = _compute_cursors(recno, pagesize, cursor_rows)
 
     return func.HttpResponse(
         QueryResponse(
-            page=page,
             pagesize=pagesize,
-            has_next=has_next,
-            has_previous=page > 1,
+            previous_recno=previous_recno,
+            next_recno=next_recno,
             items=items,
         ).model_dump_json(),
         status_code=200,
