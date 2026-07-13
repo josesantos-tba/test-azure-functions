@@ -24,21 +24,8 @@ _PROTHEUS_AUTH = (
 # Máximo de linhas exportadas por requisição.
 _MAX_ROWS = 30000
 
-# Alias de tabela válido (evita injeção via nome de tabela no FromQry).
+# Alias de tabela válido.
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
-
-# Sufixo padrão que converte o alias (ex: CTK) no nome físico (ex: CTK010).
-_TABLE_SUFFIX = "010"
-
-# FromQry com o WHERE (deleção e filtros dinâmicos) e o limite de linhas
-# embutidos na subquery (FETCH NEXT), para o banco cortar o resultado antes
-# de devolvê-lo — a genericQuery recebe o mesmo valor em 'pagesize' e retorna
-# tudo em uma única chamada. Ordena por R_E_C_N_O_ DESC para os registros
-# mais recentes virem primeiro (mesmo critério do query-json).
-_FROM_QRY_TEMPLATE = (
-    "(SELECT * FROM {table} WHERE {where} "
-    "ORDER BY R_E_C_N_O_ DESC FETCH NEXT {rows} ROWS ONLY) {alias}"
-)
 
 _ERROR_SCHEMA = {
     "type": "object",
@@ -61,20 +48,20 @@ def _json_error(message: str, status: int) -> func.HttpResponse:
         "Exporta os registros de uma tabela do Protheus em **CSV**, com no máximo "
         f"**{_MAX_ROWS}** linhas por requisição. Aceita os mesmos parâmetros do "
         "endpoint `query-json` (`table`, `fields`, `filters`), porém **sem paginação** "
-        "(`recno`/`pagesize`): o resultado vem inteiro em uma única resposta, ordenado "
-        "do registro mais recente para o mais antigo (`R_E_C_N_O_` decrescente).\n\n"
-        "A tabela é informada pelo **alias** (ex: `CTK`, `SB1`); o nome físico é "
-        f"montado com o sufixo `{_TABLE_SUFFIX}` (ex: `CTK` → `CTK{_TABLE_SUFFIX}`).\n\n"
-        "Internamente a **genericQuery** é chamada uma única vez com "
-        f"`pagesize={_MAX_ROWS}` e o limite também embutido no `FromQry` "
-        "(`FETCH NEXT ... ROWS ONLY`), para o corte ser feito no banco de dados:\n"
+        "(`recno`/`pagesize`): o resultado vem inteiro em uma única resposta, na ordem "
+        "natural retornada pelo banco de dados.\n\n"
+        "A tabela é informada pelo **alias** (ex: `CTK`, `SB1`), que o próprio "
+        "Protheus resolve para o nome físico via SX2.\n\n"
+        "Internamente a **genericQuery** é chamada uma única vez com os parâmetros "
+        f"**nativos** dela (`tables`, `fields`, `where`, `pagesize={_MAX_ROWS}`), sem "
+        "`FromQry` — o corte de linhas é feito pelo próprio `pagesize` e os filtros "
+        "dinâmicos viram o parâmetro `where`; os filtros de filial e de registros "
+        "deletados são os automáticos da API (`FilialFilter`/`DeletedFilter`):\n"
         "```\n"
         "tables=CTK\n"
         "fields=CTK_FILIAL,CTK_CODFOR,CTK_CODCLI,CTK_SEQUEN\n"
         f"pagesize={_MAX_ROWS}\n"
-        f"FromQry=(SELECT * FROM CTK{_TABLE_SUFFIX} WHERE R_E_C_N_O_ > 0 AND "
-        f"D_E_L_E_T_ <> '*' ORDER BY R_E_C_N_O_ DESC FETCH NEXT {_MAX_ROWS} "
-        "ROWS ONLY) CTK\n"
+        "where=CTK_FILIAL = 'TBA'\n"
         "FilialFilter=false\n"
         "```\n\n"
         "O CSV é retornado com separador vírgula, codificação UTF-8 (com BOM, para "
@@ -211,7 +198,7 @@ def export_csv(req: func.HttpRequest) -> func.HttpResponse:
     else:
         limit = _MAX_ROWS
 
-    where_parts = ["R_E_C_N_O_ > 0", "D_E_L_E_T_ <> '*'"]
+    where_parts: list[str] = []
 
     if filters_raw:
         conditions, err = parse_filters(filters_raw)
@@ -219,20 +206,17 @@ def export_csv(req: func.HttpRequest) -> func.HttpResponse:
             return _json_error(err, 400)
         where_parts.extend(conditions)
 
-    physical_table = f"{table}{_TABLE_SUFFIX}"
-
+    # Parâmetros nativos da genericQuery: o corte de linhas fica por conta do
+    # 'pagesize' e os filtros dinâmicos vão no 'where'. O filtro de deleção é
+    # o automático da API (DeletedFilter, ligado por padrão).
     headers = {
         "tables": table,
         "fields": fields,
         "pagesize": str(limit),
-        "FromQry": _FROM_QRY_TEMPLATE.format(
-            table=physical_table,
-            where=" AND ".join(where_parts),
-            rows=limit,
-            alias=table,
-        ),
         "FilialFilter": "false",
     }
+    if where_parts:
+        headers["where"] = " AND ".join(where_parts)
 
     try:
         resp = requests.get(
