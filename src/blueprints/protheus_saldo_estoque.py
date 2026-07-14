@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import logging
 import os
@@ -66,6 +68,19 @@ _FROM_QRY = (
     "OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"
     ") SB2"
 )
+
+# Colunas do CSV: chave do item -> cabeçalho com os nomes do relatório original.
+_CSV_COLUMNS = [
+    ("filial", "Filial"),
+    ("tipo", "Tipo"),
+    ("codigo", "Codigo"),
+    ("descricao", "Descricao"),
+    ("armazem", "Armazem"),
+    ("qtd_empenhada", "QtdEmpenhada"),
+    ("saldo_disponivel", "SaldoDisponivel"),
+    ("saldo_atual", "SaldoAtual"),
+    ("tba_arm", "TBA-ARM"),
+]
 
 _ERROR_SCHEMA = {
     "type": "object",
@@ -185,9 +200,20 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "próxima página. Internamente é buscada uma linha a mais que `limit` "
         "(`OFFSET ... FETCH NEXT limit+1 ROWS ONLY`) para calcular `has_next` "
         "sem uma segunda consulta.\n\n"
-        "Exemplo de chamada:\n"
+        "### Download em CSV (`format=csv`)\n"
+        "Com `format=csv` a resposta vem como **arquivo CSV** (separador vírgula, "
+        "UTF-8 com BOM para abrir corretamente no Excel, cabeçalho com os nomes "
+        "do relatório original: `Filial`, `Tipo`, `Codigo`, `Descricao`, "
+        "`Armazem`, `QtdEmpenhada`, `SaldoDisponivel`, `SaldoAtual`, `TBA-ARM`) "
+        "com `Content-Disposition` de download (`saldo-estoque.csv`). No CSV o "
+        f"`limit` padrão é o máximo ({_MAX_ROWS}), para o download vir completo; "
+        "`limit`/`offset` continuam valendo se informados. Os headers "
+        "`X-Row-Count` e `X-Has-Next` trazem a quantidade de linhas e se há "
+        "mais registros além do recorte.\n\n"
+        "Exemplos de chamada:\n"
         "```\n"
         "GET /api/saldo-estoque?limit=100&offset=200\n"
+        "GET /api/saldo-estoque?format=csv\n"
         "```"
     ),
     tags=["Protheus"],
@@ -213,6 +239,21 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
             "description": (
                 "Quantidade de linhas puladas antes da página: use 0 (padrão) para a "
                 "primeira página e o `next_offset` da resposta anterior para navegar."
+            ),
+        },
+        {
+            "name": "format",
+            "in": "query",
+            "required": False,
+            "schema": {
+                "type": "string",
+                "enum": ["json", "csv"],
+                "default": "json",
+                "example": "csv",
+            },
+            "description": (
+                "Formato da resposta: `json` (padrão) ou `csv` (download do "
+                f"relatório; `limit` padrão vira {_MAX_ROWS})."
             ),
         },
     ],
@@ -242,11 +283,20 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                             },
                         ],
                     },
-                }
+                },
+                "text/csv": {
+                    "schema": {"type": "string"},
+                    "example": (
+                        "Filial,Tipo,Codigo,Descricao,Armazem,QtdEmpenhada,"
+                        "SaldoDisponivel,SaldoAtual,TBA-ARM\r\n"
+                        "TBA01,Matéria-prima,10010001,FARINHA DE TRIGO,01,"
+                        "150.0,850.0,1000.0,TBA01-01\r\n"
+                    ),
+                },
             },
         },
         400: {
-            "description": "Parâmetro 'limit' ou 'offset' inválido",
+            "description": "Parâmetro 'limit', 'offset' ou 'format' inválido",
             "content": {
                 "application/json": {
                     "schema": _ERROR_SCHEMA,
@@ -291,9 +341,16 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
 @require_roles("Tables.Read")
 def saldo_estoque(req: func.HttpRequest) -> func.HttpResponse:
 
+    fmt = req.params.get("format", "json").strip().lower()
+    if fmt not in ("json", "csv"):
+        return _json_error("'format' deve ser 'json' ou 'csv'", 400)
+
+    # No CSV o padrão é o relatório completo; no JSON, uma página de
+    # _DEFAULT_LIMIT registros.
+    default_limit = _MAX_ROWS if fmt == "csv" else _DEFAULT_LIMIT
     limit_raw = req.params.get("limit", "").strip()
     try:
-        limit = int(limit_raw) if limit_raw else _DEFAULT_LIMIT
+        limit = int(limit_raw) if limit_raw else default_limit
     except ValueError:
         limit = 0
     if limit < 1:
@@ -351,6 +408,26 @@ def saldo_estoque(req: func.HttpRequest) -> func.HttpResponse:
     rows = data.get("items", [])
     has_next = len(rows) > limit
     items = [_montar_item(row) for row in rows[:limit]]
+
+    if fmt == "csv":
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\r\n")
+        writer.writerow([header for _, header in _CSV_COLUMNS])
+        for item in items:
+            writer.writerow(
+                ["" if item[key] is None else item[key] for key, _ in _CSV_COLUMNS]
+            )
+        # BOM (utf-8-sig) para o Excel reconhecer a codificação UTF-8.
+        return func.HttpResponse(
+            buffer.getvalue().encode("utf-8-sig"),
+            status_code=200,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": 'attachment; filename="saldo-estoque.csv"',
+                "X-Row-Count": str(len(items)),
+                "X-Has-Next": str(has_next).lower(),
+            },
+        )
 
     return func.HttpResponse(
         SaldoEstoqueResponse(
