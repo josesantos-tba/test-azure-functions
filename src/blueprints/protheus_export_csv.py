@@ -22,7 +22,7 @@ _PROTHEUS_AUTH = (
 )
 
 # Máximo de linhas exportadas por requisição.
-_MAX_ROWS = 30000
+_MAX_ROWS = 5000
 
 # Alias de tabela válido.
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+$")
