@@ -338,7 +338,7 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
     operation_id="saldoEstoque",
 )
 @bp.route(route="saldo-estoque", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-@require_roles("Tables.Read")
+@require_roles("Reports.Read")
 def saldo_estoque(req: func.HttpRequest) -> func.HttpResponse:
 
     fmt = req.params.get("format", "json").strip().lower()
