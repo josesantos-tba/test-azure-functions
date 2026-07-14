@@ -8,6 +8,7 @@ from src.blueprints.protheus_export_csv import bp as protheus_export_csv_bp
 from src.blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
 from src.blueprints.protheus_list_tables import bp as protheus_list_tables_bp
 from src.blueprints.protheus_query_json import bp as protheus_query_json_bp
+from src.blueprints.protheus_saldo_estoque import bp as protheus_saldo_estoque_bp
 from src.blueprints.protheus_table_count import bp as protheus_table_count_bp
 
 _STATIC_DIR = pathlib.Path(__file__).parent.parent / "src" / "static"
@@ -27,6 +28,7 @@ app.register_functions(protheus_export_csv_bp)
 app.register_functions(protheus_get_table_columns_bp)
 app.register_functions(protheus_list_tables_bp)
 app.register_functions(protheus_query_json_bp)
+app.register_functions(protheus_saldo_estoque_bp)
 app.register_functions(protheus_table_count_bp)
 
 @app.function_name(name="openapi_json")
