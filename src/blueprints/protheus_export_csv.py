@@ -43,7 +43,7 @@ def _json_error(message: str, status: int) -> func.HttpResponse:
 
 
 @openapi(
-    summary="Exporta uma tabela do Protheus em CSV (até 30 mil linhas)",
+    summary="Exporta uma tabela do Protheus em CSV (até 5 mil linhas)",
     description=(
         "Exporta os registros de uma tabela do Protheus em **CSV**, com no máximo "
         f"**{_MAX_ROWS}** linhas por requisição. Aceita os mesmos parâmetros do "
