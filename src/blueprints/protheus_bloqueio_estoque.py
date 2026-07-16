@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import azure.functions as func
@@ -26,12 +27,26 @@ _PROTHEUS_AUTH = (
 _DEFAULT_LIMIT = 100
 _MAX_ROWS = 10000
 
+# Filtros aceitos: parâmetro da query string -> coluna da SC9. O usuário
+# informa exatamente um deles.
+_FILTROS = {
+    "carga": "C9_CARGA",
+    "ordem_separacao": "C9_ORDSEP",
+    "pedido": "C9_PEDIDO",
+}
+
+# O valor do filtro é interpolado no FromQry (que viaja em header HTTP):
+# aceita apenas letras e números para não permitir quebra do SQL.
+_FILTRO_RE = re.compile(r"^[A-Za-z0-9]{1,20}$")
+
 # FromQry com a consulta de bloqueio de estoque: saldos da SB2 restritos aos
-# produtos/armazéns presentes em itens liberados (SC9). A subquery devolve apenas
-# colunas reais do dicionário — saldo_disponivel é calculado em Python. As
-# colunas do índice da SB2 (B2_FILIAL, B2_COD, B2_LOCAL) precisam existir na
-# subquery mesmo que não sejam pedidas em 'fields': a genericQuery as
-# referencia internamente e retorna 500 se faltarem.
+# produtos/armazéns dos itens liberados (SC9) que atendem ao filtro, com os
+# saldos por lote (SB8) via LEFT JOIN. A subquery devolve apenas colunas
+# reais do dicionário — as colunas derivadas (saldo_disponivel,
+# disponivel_lote) são calculadas em Python. As colunas do índice da SB2
+# (B2_FILIAL, B2_COD, B2_LOCAL) precisam existir na subquery mesmo que não
+# sejam pedidas em 'fields': a genericQuery as referencia internamente e
+# retorna 500 se faltarem.
 _FROM_QRY = (
     "(SELECT "
     "T0.B2_FILIAL AS B2_FILIAL, "
@@ -40,21 +55,33 @@ _FROM_QRY = (
     "T0.B2_QATU AS B2_QATU, "
     "T0.B2_RESERVA AS B2_RESERVA, "
     "T0.B2_QEMP AS B2_QEMP, "
+    "T2.B8_LOTECTL AS B8_LOTECTL, "
+    "T2.B8_DTVALID AS B8_DTVALID, "
+    "T2.B8_SALDO AS B8_SALDO, "
+    "T2.B8_EMPENHO AS B8_EMPENHO, "
     "T0.R_E_C_N_O_ AS R_E_C_N_O_, "
     "T0.R_E_C_D_E_L_ AS R_E_C_D_E_L_, "
     "T0.D_E_L_E_T_ AS D_E_L_E_T_ "
     "FROM SB2010 T0 "
     "INNER JOIN "
     "(SELECT DISTINCT C9_FILIAL, C9_PRODUTO, C9_LOCAL "
-    "FROM SC9010) T1 "
+    "FROM SC9010 "
+    "WHERE {filtro_coluna} = '{filtro_valor}' AND D_E_L_E_T_ = ' ') T1 "
     "ON T0.B2_FILIAL = T1.C9_FILIAL "
     "AND T0.B2_COD = T1.C9_PRODUTO "
     "AND T0.B2_LOCAL = T1.C9_LOCAL "
+    "LEFT JOIN SB8010 T2 "
+    "ON T2.B8_FILIAL = T0.B2_FILIAL "
+    "AND T2.B8_PRODUTO = T0.B2_COD "
+    "AND T2.B8_LOCAL = T0.B2_LOCAL "
+    "AND T2.D_E_L_E_T_ = ' ' "
     "WHERE T0.D_E_L_E_T_ = ' ' "
-    # Ordena pelo saldo disponível (mesma expressão calculada em Python) com
-    # R_E_C_N_O_ como desempate: com OFFSET a ordenação precisa ser total,
-    # senão linhas empatadas podem trocar de página entre requisições.
-    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
+    # Ordena pelo saldo disponível da SB2 (mesma expressão calculada em
+    # Python) e pela validade do lote; R_E_C_N_O_ das duas tabelas como
+    # desempate: com OFFSET a ordenação precisa ser total, senão linhas
+    # empatadas podem trocar de página entre requisições.
+    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T2.B8_DTVALID, "
+    "T0.R_E_C_N_O_, T2.R_E_C_N_O_ "
     "OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"
     ") SB2"
 )
@@ -62,12 +89,17 @@ _FROM_QRY = (
 # Colunas do CSV: chave do item -> cabeçalho com os nomes do relatório original.
 _CSV_COLUMNS = [
     ("filial", "Filial"),
-    ("codigo", "Codigo"),
+    ("produto", "Produto"),
     ("armazem", "Armazem"),
     ("saldo_atual", "SaldoAtual"),
     ("qtd_reservada", "QtdReservada"),
     ("qtd_empenhada", "QtdEmpenhada"),
     ("saldo_disponivel", "SaldoDisponivel"),
+    ("lote", "Lote"),
+    ("validade_lote", "ValidadeLote"),
+    ("saldo_lote", "SaldoLote"),
+    ("empenhado_lote", "EmpenhadoLote"),
+    ("disponivel_lote", "DisponivelLote"),
 ]
 
 _ERROR_SCHEMA = {
@@ -78,6 +110,10 @@ _ERROR_SCHEMA = {
 
 
 class BloqueioEstoqueResponse(BaseModel):
+    filtro: str = Field(
+        description="Filtro usado na consulta: `carga`, `ordem_separacao` ou `pedido`."
+    )
+    valor: str = Field(description="Valor do filtro usado na consulta.")
     limit: int = Field(description="Linhas por página usadas na consulta.")
     offset: int = Field(description="Deslocamento (linhas puladas) usado na consulta.")
     count: int = Field(description="Quantidade de itens retornados nesta página.")
@@ -90,11 +126,16 @@ class BloqueioEstoqueResponse(BaseModel):
     )
     items: list[dict[str, Any]] = Field(
         description=(
-            "Saldos de estoque dos produtos/armazéns com itens liberados, ordenados por "
-            "saldo disponível crescente. Cada item tem as chaves: `filial`, "
-            "`codigo`, `armazem`, `saldo_atual`, `qtd_reservada`, "
-            "`qtd_empenhada` e `saldo_disponivel` "
-            "(`saldo_atual - qtd_reservada - qtd_empenhada`)."
+            "Saldos de estoque dos produtos/armazéns dos itens liberados que "
+            "atendem ao filtro, ordenados por saldo disponível crescente e "
+            "validade do lote. Uma linha por produto/armazém/lote (produto sem "
+            "lote vem com os campos de lote `null`). Cada item tem as chaves: "
+            "`filial`, `produto`, `armazem`, `saldo_atual`, `qtd_reservada`, "
+            "`qtd_empenhada`, `saldo_disponivel` "
+            "(`saldo_atual - qtd_reservada - qtd_empenhada`), `lote`, "
+            "`validade_lote` (formato `AAAAMMDD`), `saldo_lote`, "
+            "`empenhado_lote` e `disponivel_lote` "
+            "(`saldo_lote - empenhado_lote`)."
         )
     )
 
@@ -119,41 +160,78 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
     saldo_atual = _to_float(row.get("b2_qatu"))
     qtd_reservada = _to_float(row.get("b2_reserva"))
     qtd_empenhada = _to_float(row.get("b2_qemp"))
+    # LEFT JOIN: produto sem controle de lote vem sem linha na SB8 — os
+    # campos de lote ficam null em vez de 0, para não parecer lote zerado.
+    lote = str(row.get("b8_lotectl") or "").strip()
+    if lote:
+        saldo_lote = _to_float(row.get("b8_saldo"))
+        empenhado_lote = _to_float(row.get("b8_empenho"))
+        campos_lote = {
+            "lote": lote,
+            "validade_lote": str(row.get("b8_dtvalid") or "").strip() or None,
+            "saldo_lote": saldo_lote,
+            "empenhado_lote": empenhado_lote,
+            "disponivel_lote": saldo_lote - empenhado_lote,
+        }
+    else:
+        campos_lote = {
+            "lote": None,
+            "validade_lote": None,
+            "saldo_lote": None,
+            "empenhado_lote": None,
+            "disponivel_lote": None,
+        }
     return {
         "filial": str(row.get("b2_filial", "")),
-        "codigo": str(row.get("b2_cod", "")).strip(),
+        "produto": str(row.get("b2_cod", "")).strip(),
         "armazem": str(row.get("b2_local", "")),
         "saldo_atual": saldo_atual,
         "qtd_reservada": qtd_reservada,
         "qtd_empenhada": qtd_empenhada,
         "saldo_disponivel": saldo_atual - qtd_reservada - qtd_empenhada,
+        **campos_lote,
     }
 
 
 @openapi(
-    summary="Bloqueio de estoque: saldos dos produtos com itens liberados (SB2 x SC9)",
+    summary="Bloqueio de estoque: saldos e lotes dos produtos de uma carga, "
+    "ordem de separação ou pedido (SB2 x SC9 x SB8)",
     description=(
         "Relatório de **bloqueio de estoque**: retorna o saldo de estoque "
-        "(`SB2`) dos produtos/armazéns presentes nos itens liberados "
-        "(`SC9`), permitindo identificar itens sem saldo disponível "
-        "para faturamento.\n\n"
-        "Para cada produto/armazém são retornados o saldo atual "
-        "(`B2_QATU`), a quantidade reservada (`B2_RESERVA`), a quantidade "
-        "empenhada (`B2_QEMP`) e o saldo disponível calculado como "
-        "`B2_QATU - B2_RESERVA - B2_QEMP`. Os registros vêm ordenados por "
-        "saldo disponível **crescente** (os bloqueios aparecem primeiro).\n\n"
+        "(`SB2`) e os saldos por lote (`SB8`) dos produtos/armazéns presentes "
+        "nos itens liberados (`SC9`) que atendem ao filtro informado, "
+        "permitindo identificar itens sem saldo disponível para faturamento.\n\n"
+        "### Filtro (obrigatório, exatamente um)\n"
+        "O usuário informa **exatamente um** dos parâmetros abaixo, aplicado "
+        "sobre os itens liberados (`SC9`):\n"
+        "- `carga` — código da carga (`C9_CARGA`);\n"
+        "- `ordem_separacao` — ordem de separação (`C9_ORDSEP`);\n"
+        "- `pedido` — número do pedido de venda (`C9_PEDIDO`).\n\n"
+        "Para cada produto/armazém são retornados o saldo atual (`B2_QATU`), a "
+        "quantidade reservada (`B2_RESERVA`), a quantidade empenhada "
+        "(`B2_QEMP`) e o saldo disponível calculado como "
+        "`B2_QATU - B2_RESERVA - B2_QEMP`; e, por lote (`SB8`, via LEFT JOIN — "
+        "uma linha por lote, campos `null` quando o produto não controla "
+        "lote): lote (`B8_LOTECTL`), validade (`B8_DTVALID`), saldo "
+        "(`B8_SALDO`), empenho (`B8_EMPENHO`) e disponível do lote calculado "
+        "como `B8_SALDO - B8_EMPENHO`. Os registros vêm ordenados por saldo "
+        "disponível **crescente** (os bloqueios aparecem primeiro) e validade "
+        "do lote.\n\n"
         "Internamente executa a **genericQuery** uma única vez com o SELECT "
-        "(join `SB2010` x `SC9010`) embutido no `FromQry`, "
-        "aliased como `SB2`; o `saldo_disponivel` é calculado pela função a "
+        "(join `SB2010` x `SC9010` filtrada x `SB8010`) embutido no `FromQry`, "
+        "aliased como `SB2`; as colunas derivadas são calculadas pela função a "
         "partir das colunas reais retornadas:\n"
         "```\n"
-        "tables=SB2,SC9\n"
-        "fields=B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP\n"
+        "tables=SB2,SB8\n"
+        "fields=B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
+        "B8_LOTECTL,B8_DTVALID,B8_SALDO,B8_EMPENHO\n"
         "pagesize=<limit+1>\n"
-        "FromQry=(SELECT T0.B2_FILIAL, T0.B2_COD, T0.B2_LOCAL, ... "
+        "FromQry=(SELECT T0.B2_FILIAL, ..., T2.B8_LOTECTL, ... "
         "FROM SB2010 T0 INNER JOIN (SELECT DISTINCT C9_FILIAL, C9_PRODUTO, "
-        "C9_LOCAL FROM SC9010) T1 ON ... "
-        "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
+        "C9_LOCAL FROM SC9010 WHERE <coluna do filtro> = '<valor>' AND "
+        "D_E_L_E_T_ = ' ') T1 ON ... LEFT JOIN SB8010 T2 ON ... "
+        "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T2.B8_DTVALID, "
+        "T0.R_E_C_N_O_, T2.R_E_C_N_O_ "
         "OFFSET <offset> ROWS FETCH NEXT <limit+1> ROWS ONLY) SB2\n"
         "FilialFilter=false\n"
         "DeletedFilter=false\n"
@@ -168,22 +246,57 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "### Download em CSV (`format=csv`)\n"
         "Com `format=csv` a resposta vem como **arquivo CSV** (separador "
         "vírgula, UTF-8 com BOM para abrir corretamente no Excel, cabeçalho "
-        "`Filial`, `Codigo`, `Armazem`, `SaldoAtual`, `QtdReservada`, "
-        "`QtdEmpenhada`, `SaldoDisponivel`) com `Content-Disposition` de "
-        "download (`bloqueio-estoque.csv`). No CSV o `limit` padrão é "
-        f"o máximo ({_MAX_ROWS}), para o download vir completo; `limit`/"
-        "`offset` continuam valendo se informados. Os headers `X-Row-Count` e "
-        "`X-Has-Next` trazem a quantidade de linhas e se há mais registros "
-        "além do recorte.\n\n"
+        "`Filial`, `Produto`, `Armazem`, `SaldoAtual`, `QtdReservada`, "
+        "`QtdEmpenhada`, `SaldoDisponivel`, `Lote`, `ValidadeLote`, "
+        "`SaldoLote`, `EmpenhadoLote`, `DisponivelLote`) com "
+        "`Content-Disposition` de download (`bloqueio-estoque.csv`). No CSV o "
+        f"`limit` padrão é o máximo ({_MAX_ROWS}), para o download vir "
+        "completo; `limit`/`offset` continuam valendo se informados. Os "
+        "headers `X-Row-Count` e `X-Has-Next` trazem a quantidade de linhas e "
+        "se há mais registros além do recorte.\n\n"
         "Exemplos de chamada:\n"
         "```\n"
-        "GET /api/bloqueio-estoque?limit=100&offset=200\n"
-        "GET /api/bloqueio-estoque?format=csv\n"
+        "GET /api/bloqueio-estoque?carga=006505\n"
+        "GET /api/bloqueio-estoque?ordem_separacao=123456\n"
+        "GET /api/bloqueio-estoque?pedido=045123&format=csv\n"
         "```"
     ),
     tags=["Protheus"],
     method="get",
     parameters=[
+        {
+            "name": "carga",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "example": "006505"},
+            "description": (
+                "Código da carga (`C9_CARGA`). Informe exatamente um dos "
+                "filtros: `carga`, `ordem_separacao` ou `pedido`. Apenas "
+                "letras e números."
+            ),
+        },
+        {
+            "name": "ordem_separacao",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "example": "123456"},
+            "description": (
+                "Ordem de separação (`C9_ORDSEP`). Informe exatamente um dos "
+                "filtros: `carga`, `ordem_separacao` ou `pedido`. Apenas "
+                "letras e números."
+            ),
+        },
+        {
+            "name": "pedido",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "example": "045123"},
+            "description": (
+                "Número do pedido de venda (`C9_PEDIDO`). Informe exatamente "
+                "um dos filtros: `carga`, `ordem_separacao` ou `pedido`. "
+                "Apenas letras e números."
+            ),
+        },
         {
             "name": "limit",
             "in": "query",
@@ -229,6 +342,8 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                 "application/json": {
                     "schema": inline_refs(BloqueioEstoqueResponse.model_json_schema()),
                     "example": {
+                        "filtro": "carga",
+                        "valor": "006505",
                         "limit": 100,
                         "offset": 0,
                         "count": 1,
@@ -237,12 +352,17 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                         "items": [
                             {
                                 "filial": "TBA01",
-                                "codigo": "30010001",
+                                "produto": "30010001",
                                 "armazem": "01",
                                 "saldo_atual": 1000.0,
                                 "qtd_reservada": 400.0,
                                 "qtd_empenhada": 150.0,
                                 "saldo_disponivel": 450.0,
+                                "lote": "L20260101",
+                                "validade_lote": "20261231",
+                                "saldo_lote": 600.0,
+                                "empenhado_lote": 150.0,
+                                "disponivel_lote": 450.0,
                             },
                         ],
                     },
@@ -250,19 +370,27 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                 "text/csv": {
                     "schema": {"type": "string"},
                     "example": (
-                        "Filial,Codigo,Armazem,SaldoAtual,QtdReservada,"
-                        "QtdEmpenhada,SaldoDisponivel\r\n"
-                        "TBA01,30010001,01,1000.0,400.0,150.0,450.0\r\n"
+                        "Filial,Produto,Armazem,SaldoAtual,QtdReservada,"
+                        "QtdEmpenhada,SaldoDisponivel,Lote,ValidadeLote,"
+                        "SaldoLote,EmpenhadoLote,DisponivelLote\r\n"
+                        "TBA01,30010001,01,1000.0,400.0,150.0,450.0,"
+                        "L20260101,20261231,600.0,150.0,450.0\r\n"
                     ),
                 },
             },
         },
         400: {
-            "description": "Parâmetro 'limit', 'offset' ou 'format' inválido",
+            "description": (
+                "Filtro ausente/duplicado/inválido ou parâmetro 'limit', "
+                "'offset' ou 'format' inválido"
+            ),
             "content": {
                 "application/json": {
                     "schema": _ERROR_SCHEMA,
-                    "example": {"error": "'limit' deve ser um inteiro >= 1"},
+                    "example": {
+                        "error": "Informe exatamente um dos filtros: 'carga', "
+                        "'ordem_separacao' ou 'pedido'"
+                    },
                 }
             },
         },
@@ -303,6 +431,23 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
 @require_roles("Reports.Read")
 def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
 
+    filtros_informados = {
+        nome: req.params.get(nome, "").strip()
+        for nome in _FILTROS
+        if req.params.get(nome, "").strip()
+    }
+    if len(filtros_informados) != 1:
+        return _json_error(
+            "Informe exatamente um dos filtros: 'carga', 'ordem_separacao' ou 'pedido'",
+            400,
+        )
+    filtro, valor = next(iter(filtros_informados.items()))
+    if not _FILTRO_RE.match(valor):
+        return _json_error(
+            f"'{filtro}' deve conter apenas letras e números (máx. 20 caracteres)",
+            400,
+        )
+
     fmt = req.params.get("format", "json").strip().lower()
     if fmt not in ("json", "csv"):
         return _json_error("'format' deve ser 'json' ou 'csv'", 400)
@@ -328,14 +473,22 @@ def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
         return _json_error("'offset' deve ser um inteiro >= 0", 400)
 
     headers = {
-        "tables": "SB2,SC9",
-        "fields": "B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP",
+        "tables": "SB2,SB8",
+        "fields": (
+            "B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
+            "B8_LOTECTL,B8_DTVALID,B8_SALDO,B8_EMPENHO"
+        ),
         # Uma linha a mais que a página para saber se há próxima página.
         "pagesize": str(limit + 1),
-        "FromQry": _FROM_QRY.format(offset=offset, rows=limit + 1),
+        "FromQry": _FROM_QRY.format(
+            filtro_coluna=_FILTROS[filtro],
+            filtro_valor=valor,
+            offset=offset,
+            rows=limit + 1,
+        ),
         "FilialFilter": "false",
-        # O filtro de deleção já está embutido no FromQry; o automático
-        # qualificaria D_E_L_E_T_ também no alias SC9, inexistente na subquery.
+        # Os filtros de deleção já estão embutidos no FromQry; o automático
+        # qualificaria D_E_L_E_T_ também no alias SB8, inexistente na subquery.
         "DeletedFilter": "false",
     }
 
@@ -392,6 +545,8 @@ def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
 
     return func.HttpResponse(
         BloqueioEstoqueResponse(
+            filtro=filtro,
+            valor=valor,
             limit=limit,
             offset=offset,
             count=len(items),
