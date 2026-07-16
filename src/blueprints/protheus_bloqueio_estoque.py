@@ -41,12 +41,15 @@ _FILTRO_RE = re.compile(r"^[A-Za-z0-9]{1,20}$")
 
 # FromQry com a consulta de bloqueio de estoque: saldos da SB2 restritos aos
 # produtos/armazéns dos itens liberados (SC9) que atendem ao filtro, com os
-# saldos por lote (SB8) via LEFT JOIN. A subquery devolve apenas colunas
-# reais do dicionário — as colunas derivadas (saldo_disponivel,
-# disponivel_lote) são calculadas em Python. As colunas do índice da SB2
-# (B2_FILIAL, B2_COD, B2_LOCAL) precisam existir na subquery mesmo que não
-# sejam pedidas em 'fields': a genericQuery as referencia internamente e
-# retorna 500 se faltarem.
+# saldos por lote (SB8) agregados por produto/armazém via LEFT JOIN — uma
+# linha por registro da SB2. A subquery devolve apenas colunas reais do
+# dicionário — as colunas derivadas (saldo_disponivel, disponivel_lote) são
+# calculadas em Python; os agregados da SB8 são aliased para colunas reais
+# da própria SB8 (COUNT(*) usa B8_QTDORI, que não é retornada de verdade)
+# porque a genericQuery valida 'fields' contra o dicionário. As colunas do
+# índice da SB2 (B2_FILIAL, B2_COD, B2_LOCAL) precisam existir na subquery
+# mesmo que não sejam pedidas em 'fields': a genericQuery as referencia
+# internamente e retorna 500 se faltarem.
 _FROM_QRY = (
     "(SELECT "
     "T0.B2_FILIAL AS B2_FILIAL, "
@@ -55,10 +58,10 @@ _FROM_QRY = (
     "T0.B2_QATU AS B2_QATU, "
     "T0.B2_RESERVA AS B2_RESERVA, "
     "T0.B2_QEMP AS B2_QEMP, "
-    "T2.B8_LOTECTL AS B8_LOTECTL, "
-    "T2.B8_DTVALID AS B8_DTVALID, "
-    "T2.B8_SALDO AS B8_SALDO, "
-    "T2.B8_EMPENHO AS B8_EMPENHO, "
+    "NVL(T2.QTD_LOTES, 0) AS B8_QTDORI, "
+    "NVL(T2.SALDO_LOTE, 0) AS B8_SALDO, "
+    "NVL(T2.EMPENHADO_LOTE, 0) AS B8_EMPENHO, "
+    "T2.PROXIMA_VALIDADE AS B8_DTVALID, "
     "T0.R_E_C_N_O_ AS R_E_C_N_O_, "
     "T0.R_E_C_D_E_L_ AS R_E_C_D_E_L_, "
     "T0.D_E_L_E_T_ AS D_E_L_E_T_ "
@@ -70,18 +73,27 @@ _FROM_QRY = (
     "ON T0.B2_FILIAL = T1.C9_FILIAL "
     "AND T0.B2_COD = T1.C9_PRODUTO "
     "AND T0.B2_LOCAL = T1.C9_LOCAL "
-    "LEFT JOIN SB8010 T2 "
+    "LEFT JOIN "
+    "(SELECT "
+    "B8_FILIAL, "
+    "B8_PRODUTO, "
+    "B8_LOCAL, "
+    "COUNT(*) AS QTD_LOTES, "
+    "SUM(B8_SALDO) AS SALDO_LOTE, "
+    "SUM(B8_EMPENHO) AS EMPENHADO_LOTE, "
+    "MIN(B8_DTVALID) AS PROXIMA_VALIDADE "
+    "FROM SB8010 "
+    "WHERE D_E_L_E_T_ = ' ' "
+    "GROUP BY B8_FILIAL, B8_PRODUTO, B8_LOCAL) T2 "
     "ON T2.B8_FILIAL = T0.B2_FILIAL "
     "AND T2.B8_PRODUTO = T0.B2_COD "
     "AND T2.B8_LOCAL = T0.B2_LOCAL "
-    "AND T2.D_E_L_E_T_ = ' ' "
     "WHERE T0.D_E_L_E_T_ = ' ' "
     # Ordena pelo saldo disponível da SB2 (mesma expressão calculada em
-    # Python) e pela validade do lote; R_E_C_N_O_ das duas tabelas como
-    # desempate: com OFFSET a ordenação precisa ser total, senão linhas
-    # empatadas podem trocar de página entre requisições.
-    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T2.B8_DTVALID, "
-    "T0.R_E_C_N_O_, T2.R_E_C_N_O_ "
+    # Python) com R_E_C_N_O_ como desempate: com OFFSET a ordenação precisa
+    # ser total, senão linhas empatadas podem trocar de página entre
+    # requisições.
+    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
     "OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"
     ") SB2"
 )
@@ -95,11 +107,11 @@ _CSV_COLUMNS = [
     ("qtd_reservada", "QtdReservada"),
     ("qtd_empenhada", "QtdEmpenhada"),
     ("saldo_disponivel", "SaldoDisponivel"),
-    ("lote", "Lote"),
-    ("validade_lote", "ValidadeLote"),
+    ("qtd_lotes", "QtdLotes"),
     ("saldo_lote", "SaldoLote"),
     ("empenhado_lote", "EmpenhadoLote"),
     ("disponivel_lote", "DisponivelLote"),
+    ("proxima_validade", "ProximaValidade"),
 ]
 
 _ERROR_SCHEMA = {
@@ -127,15 +139,16 @@ class BloqueioEstoqueResponse(BaseModel):
     items: list[dict[str, Any]] = Field(
         description=(
             "Saldos de estoque dos produtos/armazéns dos itens liberados que "
-            "atendem ao filtro, ordenados por saldo disponível crescente e "
-            "validade do lote. Uma linha por produto/armazém/lote (produto sem "
-            "lote vem com os campos de lote `null`). Cada item tem as chaves: "
-            "`filial`, `produto`, `armazem`, `saldo_atual`, `qtd_reservada`, "
-            "`qtd_empenhada`, `saldo_disponivel` "
-            "(`saldo_atual - qtd_reservada - qtd_empenhada`), `lote`, "
-            "`validade_lote` (formato `AAAAMMDD`), `saldo_lote`, "
-            "`empenhado_lote` e `disponivel_lote` "
-            "(`saldo_lote - empenhado_lote`)."
+            "atendem ao filtro, ordenados por saldo disponível crescente — uma "
+            "linha por produto/armazém, com os lotes (SB8) agregados. Cada "
+            "item tem as chaves: `filial`, `produto`, `armazem`, "
+            "`saldo_atual`, `qtd_reservada`, `qtd_empenhada`, "
+            "`saldo_disponivel` (`saldo_atual - qtd_reservada - "
+            "qtd_empenhada`), `qtd_lotes`, `saldo_lote` (soma dos saldos dos "
+            "lotes), `empenhado_lote` (soma dos empenhos), `disponivel_lote` "
+            "(`saldo_lote - empenhado_lote`) e `proxima_validade` (menor "
+            "`B8_DTVALID`, formato `AAAAMMDD`; `null` quando o produto não "
+            "controla lote)."
         )
     )
 
@@ -160,27 +173,10 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
     saldo_atual = _to_float(row.get("b2_qatu"))
     qtd_reservada = _to_float(row.get("b2_reserva"))
     qtd_empenhada = _to_float(row.get("b2_qemp"))
-    # LEFT JOIN: produto sem controle de lote vem sem linha na SB8 — os
-    # campos de lote ficam null em vez de 0, para não parecer lote zerado.
-    lote = str(row.get("b8_lotectl") or "").strip()
-    if lote:
-        saldo_lote = _to_float(row.get("b8_saldo"))
-        empenhado_lote = _to_float(row.get("b8_empenho"))
-        campos_lote = {
-            "lote": lote,
-            "validade_lote": str(row.get("b8_dtvalid") or "").strip() or None,
-            "saldo_lote": saldo_lote,
-            "empenhado_lote": empenhado_lote,
-            "disponivel_lote": saldo_lote - empenhado_lote,
-        }
-    else:
-        campos_lote = {
-            "lote": None,
-            "validade_lote": None,
-            "saldo_lote": None,
-            "empenhado_lote": None,
-            "disponivel_lote": None,
-        }
+    # Agregados da SB8 (aliased no FromQry): b8_qtdori carrega o COUNT(*) de
+    # lotes; NVL no SQL já garante 0 quando o produto não tem lote.
+    saldo_lote = _to_float(row.get("b8_saldo"))
+    empenhado_lote = _to_float(row.get("b8_empenho"))
     return {
         "filial": str(row.get("b2_filial", "")),
         "produto": str(row.get("b2_cod", "")).strip(),
@@ -189,49 +185,57 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "qtd_reservada": qtd_reservada,
         "qtd_empenhada": qtd_empenhada,
         "saldo_disponivel": saldo_atual - qtd_reservada - qtd_empenhada,
-        **campos_lote,
+        "qtd_lotes": int(_to_float(row.get("b8_qtdori"))),
+        "saldo_lote": saldo_lote,
+        "empenhado_lote": empenhado_lote,
+        "disponivel_lote": saldo_lote - empenhado_lote,
+        "proxima_validade": str(row.get("b8_dtvalid") or "").strip() or None,
     }
 
 
 @openapi(
-    summary="Bloqueio de estoque: saldos e lotes dos produtos de uma carga, "
-    "ordem de separação ou pedido (SB2 x SC9 x SB8)",
+    summary="Bloqueio de estoque: saldos e lotes agregados dos produtos de uma "
+    "carga, ordem de separação ou pedido (SB2 x SC9 x SB8)",
     description=(
         "Relatório de **bloqueio de estoque**: retorna o saldo de estoque "
-        "(`SB2`) e os saldos por lote (`SB8`) dos produtos/armazéns presentes "
-        "nos itens liberados (`SC9`) que atendem ao filtro informado, "
-        "permitindo identificar itens sem saldo disponível para faturamento.\n\n"
+        "(`SB2`) e os saldos por lote (`SB8`, agregados por produto/armazém) "
+        "dos produtos presentes nos itens liberados (`SC9`) que atendem ao "
+        "filtro informado, permitindo identificar itens sem saldo disponível "
+        "para faturamento.\n\n"
         "### Filtro (obrigatório, exatamente um)\n"
         "O usuário informa **exatamente um** dos parâmetros abaixo, aplicado "
         "sobre os itens liberados (`SC9`):\n"
         "- `carga` — código da carga (`C9_CARGA`);\n"
         "- `ordem_separacao` — ordem de separação (`C9_ORDSEP`);\n"
         "- `pedido` — número do pedido de venda (`C9_PEDIDO`).\n\n"
-        "Para cada produto/armazém são retornados o saldo atual (`B2_QATU`), a "
-        "quantidade reservada (`B2_RESERVA`), a quantidade empenhada "
-        "(`B2_QEMP`) e o saldo disponível calculado como "
-        "`B2_QATU - B2_RESERVA - B2_QEMP`; e, por lote (`SB8`, via LEFT JOIN — "
-        "uma linha por lote, campos `null` quando o produto não controla "
-        "lote): lote (`B8_LOTECTL`), validade (`B8_DTVALID`), saldo "
-        "(`B8_SALDO`), empenho (`B8_EMPENHO`) e disponível do lote calculado "
-        "como `B8_SALDO - B8_EMPENHO`. Os registros vêm ordenados por saldo "
-        "disponível **crescente** (os bloqueios aparecem primeiro) e validade "
-        "do lote.\n\n"
+        "Cada linha é um produto/armazém com: saldo atual (`B2_QATU`), "
+        "quantidade reservada (`B2_RESERVA`), quantidade empenhada "
+        "(`B2_QEMP`) e saldo disponível calculado como "
+        "`B2_QATU - B2_RESERVA - B2_QEMP`; e os lotes (`SB8`) agregados via "
+        "LEFT JOIN: quantidade de lotes (`COUNT(*)`), saldo somado "
+        "(`SUM(B8_SALDO)`), empenho somado (`SUM(B8_EMPENHO)`), disponível "
+        "dos lotes (`saldo_lote - empenhado_lote`) e a próxima validade "
+        "(`MIN(B8_DTVALID)`; `null` quando o produto não controla lote — os "
+        "agregados numéricos vêm `0`). Os registros vêm ordenados por saldo "
+        "disponível **crescente** (os bloqueios aparecem primeiro).\n\n"
         "Internamente executa a **genericQuery** uma única vez com o SELECT "
-        "(join `SB2010` x `SC9010` filtrada x `SB8010`) embutido no `FromQry`, "
-        "aliased como `SB2`; as colunas derivadas são calculadas pela função a "
-        "partir das colunas reais retornadas:\n"
+        "(join `SB2010` x `SC9010` filtrada x `SB8010` agregada) embutido no "
+        "`FromQry`, aliased como `SB2`; as colunas derivadas são calculadas "
+        "pela função a partir das colunas reais retornadas — os agregados da "
+        "SB8 são aliased para colunas reais do dicionário (`B8_QTDORI` "
+        "carrega o `COUNT(*)` de lotes):\n"
         "```\n"
         "tables=SB2,SB8\n"
         "fields=B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
-        "B8_LOTECTL,B8_DTVALID,B8_SALDO,B8_EMPENHO\n"
+        "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID\n"
         "pagesize=<limit+1>\n"
-        "FromQry=(SELECT T0.B2_FILIAL, ..., T2.B8_LOTECTL, ... "
+        "FromQry=(SELECT T0.B2_FILIAL, ..., NVL(T2.QTD_LOTES, 0), ... "
         "FROM SB2010 T0 INNER JOIN (SELECT DISTINCT C9_FILIAL, C9_PRODUTO, "
         "C9_LOCAL FROM SC9010 WHERE <coluna do filtro> = '<valor>' AND "
-        "D_E_L_E_T_ = ' ') T1 ON ... LEFT JOIN SB8010 T2 ON ... "
-        "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T2.B8_DTVALID, "
-        "T0.R_E_C_N_O_, T2.R_E_C_N_O_ "
+        "D_E_L_E_T_ = ' ') T1 ON ... LEFT JOIN (SELECT B8_FILIAL, ..., "
+        "COUNT(*), SUM(B8_SALDO), SUM(B8_EMPENHO), MIN(B8_DTVALID) "
+        "FROM SB8010 WHERE D_E_L_E_T_ = ' ' GROUP BY ...) T2 ON ... "
+        "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
         "OFFSET <offset> ROWS FETCH NEXT <limit+1> ROWS ONLY) SB2\n"
         "FilialFilter=false\n"
         "DeletedFilter=false\n"
@@ -247,8 +251,8 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "Com `format=csv` a resposta vem como **arquivo CSV** (separador "
         "vírgula, UTF-8 com BOM para abrir corretamente no Excel, cabeçalho "
         "`Filial`, `Produto`, `Armazem`, `SaldoAtual`, `QtdReservada`, "
-        "`QtdEmpenhada`, `SaldoDisponivel`, `Lote`, `ValidadeLote`, "
-        "`SaldoLote`, `EmpenhadoLote`, `DisponivelLote`) com "
+        "`QtdEmpenhada`, `SaldoDisponivel`, `QtdLotes`, `SaldoLote`, "
+        "`EmpenhadoLote`, `DisponivelLote`, `ProximaValidade`) com "
         "`Content-Disposition` de download (`bloqueio-estoque.csv`). No CSV o "
         f"`limit` padrão é o máximo ({_MAX_ROWS}), para o download vir "
         "completo; `limit`/`offset` continuam valendo se informados. Os "
@@ -256,7 +260,7 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "se há mais registros além do recorte.\n\n"
         "Exemplos de chamada:\n"
         "```\n"
-        "GET /api/bloqueio-estoque?carga=006505\n"
+        "GET /api/bloqueio-estoque?carga=006407\n"
         "GET /api/bloqueio-estoque?ordem_separacao=123456\n"
         "GET /api/bloqueio-estoque?pedido=045123&format=csv\n"
         "```"
@@ -268,7 +272,7 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
             "name": "carga",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "example": "006505"},
+            "schema": {"type": "string", "example": "006407"},
             "description": (
                 "Código da carga (`C9_CARGA`). Informe exatamente um dos "
                 "filtros: `carga`, `ordem_separacao` ou `pedido`. Apenas "
@@ -343,7 +347,7 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                     "schema": inline_refs(BloqueioEstoqueResponse.model_json_schema()),
                     "example": {
                         "filtro": "carga",
-                        "valor": "006505",
+                        "valor": "006407",
                         "limit": 100,
                         "offset": 0,
                         "count": 1,
@@ -358,11 +362,11 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                                 "qtd_reservada": 400.0,
                                 "qtd_empenhada": 150.0,
                                 "saldo_disponivel": 450.0,
-                                "lote": "L20260101",
-                                "validade_lote": "20261231",
-                                "saldo_lote": 600.0,
+                                "qtd_lotes": 3,
+                                "saldo_lote": 1000.0,
                                 "empenhado_lote": 150.0,
-                                "disponivel_lote": 450.0,
+                                "disponivel_lote": 850.0,
+                                "proxima_validade": "20261231",
                             },
                         ],
                     },
@@ -371,10 +375,10 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
                     "schema": {"type": "string"},
                     "example": (
                         "Filial,Produto,Armazem,SaldoAtual,QtdReservada,"
-                        "QtdEmpenhada,SaldoDisponivel,Lote,ValidadeLote,"
-                        "SaldoLote,EmpenhadoLote,DisponivelLote\r\n"
+                        "QtdEmpenhada,SaldoDisponivel,QtdLotes,SaldoLote,"
+                        "EmpenhadoLote,DisponivelLote,ProximaValidade\r\n"
                         "TBA01,30010001,01,1000.0,400.0,150.0,450.0,"
-                        "L20260101,20261231,600.0,150.0,450.0\r\n"
+                        "3,1000.0,150.0,850.0,20261231\r\n"
                     ),
                 },
             },
@@ -476,7 +480,7 @@ def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
         "tables": "SB2,SB8",
         "fields": (
             "B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
-            "B8_LOTECTL,B8_DTVALID,B8_SALDO,B8_EMPENHO"
+            "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID"
         ),
         # Uma linha a mais que a página para saber se há próxima página.
         "pagesize": str(limit + 1),
