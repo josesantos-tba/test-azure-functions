@@ -35,9 +35,13 @@ _FILTROS = {
     "pedido": "C9_PEDIDO",
 }
 
-# O valor do filtro é interpolado no FromQry (que viaja em header HTTP):
-# aceita apenas letras e números para não permitir quebra do SQL.
-_FILTRO_RE = re.compile(r"^[A-Za-z0-9]{1,20}$")
+# C9_CARGA, C9_ORDSEP e C9_PEDIDO são campos numéricos armazenados como
+# caracter de 6 posições com zeros à esquerda (ex: '006407'). Aceita-se só
+# dígitos (até 6) e o valor é completado com zfill(6) antes da consulta.
+# Restringir a dígitos também protege o FromQry (que viaja em header HTTP)
+# contra quebra do SQL, já que o valor é interpolado nele.
+_FILTRO_RE = re.compile(r"^\d{1,6}$")
+_FILTRO_TAMANHO = 6
 
 # FromQry com a consulta de bloqueio de estoque: saldos da SB2 restritos aos
 # produtos/armazéns dos itens liberados (SC9) que atendem ao filtro, com os
@@ -125,7 +129,12 @@ class BloqueioEstoqueResponse(BaseModel):
     filtro: str = Field(
         description="Filtro usado na consulta: `carga`, `ordem_separacao` ou `pedido`."
     )
-    valor: str = Field(description="Valor do filtro usado na consulta.")
+    valor: str = Field(
+        description=(
+            "Valor do filtro usado na consulta, já normalizado com zeros à "
+            "esquerda para 6 posições (ex: `006407`)."
+        )
+    )
     limit: int = Field(description="Linhas por página usadas na consulta.")
     offset: int = Field(description="Deslocamento (linhas puladas) usado na consulta.")
     count: int = Field(description="Quantidade de itens retornados nesta página.")
@@ -208,6 +217,11 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "- `carga` — código da carga (`C9_CARGA`);\n"
         "- `ordem_separacao` — ordem de separação (`C9_ORDSEP`);\n"
         "- `pedido` — número do pedido de venda (`C9_PEDIDO`).\n\n"
+        "Os três campos são numéricos armazenados como **caracter de 6 "
+        "posições** com zeros à esquerda (ex: `006407`). O valor informado "
+        "deve conter apenas dígitos (até 6) e é completado automaticamente "
+        "com zeros à esquerda antes da consulta — `carga=6407` e "
+        "`carga=006407` retornam o mesmo resultado.\n\n"
         "Cada linha é um produto/armazém com: saldo atual (`B2_QATU`), "
         "quantidade reservada (`B2_RESERVA`), quantidade empenhada "
         "(`B2_QEMP`) e saldo disponível calculado como "
@@ -272,33 +286,36 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
             "name": "carga",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "example": "006407"},
+            "schema": {"type": "string", "pattern": "^[0-9]{1,6}$", "example": "006407"},
             "description": (
                 "Código da carga (`C9_CARGA`). Informe exatamente um dos "
                 "filtros: `carga`, `ordem_separacao` ou `pedido`. Apenas "
-                "letras e números."
+                "dígitos (até 6); completado com zeros à esquerda (`6407` = "
+                "`006407`)."
             ),
         },
         {
             "name": "ordem_separacao",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "example": "123456"},
+            "schema": {"type": "string", "pattern": "^[0-9]{1,6}$", "example": "123456"},
             "description": (
                 "Ordem de separação (`C9_ORDSEP`). Informe exatamente um dos "
                 "filtros: `carga`, `ordem_separacao` ou `pedido`. Apenas "
-                "letras e números."
+                "dígitos (até 6); completado com zeros à esquerda (`6407` = "
+                "`006407`)."
             ),
         },
         {
             "name": "pedido",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "example": "045123"},
+            "schema": {"type": "string", "pattern": "^[0-9]{1,6}$", "example": "045123"},
             "description": (
                 "Número do pedido de venda (`C9_PEDIDO`). Informe exatamente "
                 "um dos filtros: `carga`, `ordem_separacao` ou `pedido`. "
-                "Apenas letras e números."
+                "Apenas dígitos (até 6); completado com zeros à esquerda "
+                "(`6407` = `006407`)."
             ),
         },
         {
@@ -448,9 +465,13 @@ def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
     filtro, valor = next(iter(filtros_informados.items()))
     if not _FILTRO_RE.match(valor):
         return _json_error(
-            f"'{filtro}' deve conter apenas letras e números (máx. 20 caracteres)",
+            f"'{filtro}' deve conter apenas dígitos (máx. {_FILTRO_TAMANHO}), "
+            f"ex: 006407",
             400,
         )
+    # Campo caracter de 6 posições no Protheus: completa com zeros à
+    # esquerda para casar com o valor armazenado (ex: '6407' -> '006407').
+    valor = valor.zfill(_FILTRO_TAMANHO)
 
     fmt = req.params.get("format", "json").strip().lower()
     if fmt not in ("json", "csv"):
