@@ -4,6 +4,11 @@ import pathlib
 import azure.functions as func
 from pydantic import BaseModel
 from azure_functions_openapi import ( get_openapi_json, openapi, render_swagger_ui )
+from src.features.databricks.export_csv import bp as databricks_export_csv_bp
+from src.features.databricks.list_tables import bp as databricks_list_tables_bp
+from src.features.databricks.query_json import bp as databricks_query_json_bp
+from src.features.databricks.table_columns import bp as databricks_table_columns_bp
+from src.features.databricks.table_count import bp as databricks_table_count_bp
 from src.features.protheus.bloqueio_estoque import bp as protheus_bloqueio_estoque_bp
 from src.features.protheus.export_csv import bp as protheus_export_csv_bp
 from src.features.protheus.table_columns import bp as protheus_get_table_columns_bp
@@ -25,6 +30,11 @@ _OPENAPI_DESCRIPTION = (
 )
 
 app = func.FunctionApp()
+app.register_functions(databricks_export_csv_bp)
+app.register_functions(databricks_list_tables_bp)
+app.register_functions(databricks_query_json_bp)
+app.register_functions(databricks_table_columns_bp)
+app.register_functions(databricks_table_count_bp)
 app.register_functions(protheus_bloqueio_estoque_bp)
 app.register_functions(protheus_export_csv_bp)
 app.register_functions(protheus_get_table_columns_bp)
