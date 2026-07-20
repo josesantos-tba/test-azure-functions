@@ -4,13 +4,13 @@ import pathlib
 import azure.functions as func
 from pydantic import BaseModel
 from azure_functions_openapi import ( get_openapi_json, openapi, render_swagger_ui )
-from src.blueprints.protheus_bloqueio_estoque import bp as protheus_bloqueio_estoque_bp
-from src.blueprints.protheus_export_csv import bp as protheus_export_csv_bp
-from src.blueprints.protheus_get_table_columns import bp as protheus_get_table_columns_bp
-from src.blueprints.protheus_list_tables import bp as protheus_list_tables_bp
-from src.blueprints.protheus_query_json import bp as protheus_query_json_bp
-from src.blueprints.protheus_saldo_estoque import bp as protheus_saldo_estoque_bp
-from src.blueprints.protheus_table_count import bp as protheus_table_count_bp
+from src.features.protheus.bloqueio_estoque import bp as protheus_bloqueio_estoque_bp
+from src.features.protheus.export_csv import bp as protheus_export_csv_bp
+from src.features.protheus.table_columns import bp as protheus_get_table_columns_bp
+from src.features.protheus.list_tables import bp as protheus_list_tables_bp
+from src.features.protheus.query_json import bp as protheus_query_json_bp
+from src.features.protheus.saldo_estoque import bp as protheus_saldo_estoque_bp
+from src.features.protheus.table_count import bp as protheus_table_count_bp
 
 _STATIC_DIR = pathlib.Path(__file__).parent.parent / "src" / "static"
 
