@@ -25,16 +25,22 @@ DOCS = {
         "deve conter apenas dígitos (até 6) e é completado automaticamente "
         "com zeros à esquerda antes da consulta — `carga=6407` e "
         "`carga=006407` retornam o mesmo resultado.\n\n"
-        "Cada linha é um produto/armazém com: saldo atual (`B2_QATU`), "
-        "quantidade reservada (`B2_RESERVA`), quantidade empenhada "
-        "(`B2_QEMP`) e saldo disponível calculado como "
-        "`B2_QATU - B2_RESERVA - B2_QEMP`; e os lotes (`SB8`) agregados via "
+        "Cada linha é um **item liberado** (`SC9`) com: saldo atual "
+        "(`B2_QATU`), quantidade reservada (`B2_RESERVA`), quantidade "
+        "empenhada (`B2_QEMP`) e saldo disponível calculado como "
+        "`B2_QATU - B2_RESERVA - B2_QEMP`; os lotes (`SB8`) agregados via "
         "LEFT JOIN: quantidade de lotes (`COUNT(*)`), saldo somado "
         "(`SUM(B8_SALDO)`), empenho somado (`SUM(B8_EMPENHO)`), disponível "
         "dos lotes (`saldo_lote - empenhado_lote`) e a próxima validade "
         "(`MIN(B8_DTVALID)`; `null` quando o produto não controla lote — os "
-        "agregados numéricos vêm `0`). Os registros vêm ordenados por saldo "
-        "disponível **crescente** (os bloqueios aparecem primeiro).\n\n"
+        "agregados numéricos vêm `0`); e os dados do item de pedido (`SC9`): "
+        "pedido (`C9_PEDIDO`), item (`C9_ITEM`), quantidade liberada "
+        "(`C9_QTDLIB`), nota fiscal (`C9_NFISCAL`) e os "
+        "bloqueios de estoque (`C9_BLEST`) e crédito (`C9_BLCRED`). Como a "
+        "`SC9` não é agregada, o mesmo produto/armazém aparece repetido "
+        "quando a carga tem mais de um item. Os registros vêm ordenados por "
+        "saldo disponível **crescente** (os bloqueios aparecem primeiro) e "
+        "por pedido.\n\n"
         "Internamente executa a **genericQuery** uma única vez com o SELECT "
         "(join `SB2010` x `SC9010` filtrada x `SB8010` agregada) embutido no "
         "`FromQry`, aliased como `SB2`; as colunas derivadas são calculadas "
@@ -42,18 +48,22 @@ DOCS = {
         "SB8 são aliased para colunas reais do dicionário (`B8_QTDORI` "
         "carrega o `COUNT(*)` de lotes):\n"
         "```\n"
-        "tables=SB2,SB8\n"
+        "tables=SB2,SB8,SC9\n"
         "fields=B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
-        "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID\n"
+        "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID,"
+        "C9_PEDIDO,C9_ITEM,C9_QTDLIB,C9_NFISCAL,C9_BLEST,C9_BLCRED\n"
         "pagesize=<limit+1>\n"
-        "FromQry=(SELECT T0.B2_FILIAL, ..., NVL(T2.QTD_LOTES, 0), ... "
-        "FROM SB2010 T0 INNER JOIN (SELECT DISTINCT C9_FILIAL, C9_PRODUTO, "
-        "C9_LOCAL FROM SC9010 WHERE <coluna do filtro> = '<valor>' AND "
-        "D_E_L_E_T_ = ' ') T1 ON ... LEFT JOIN (SELECT B8_FILIAL, ..., "
-        "COUNT(*), SUM(B8_SALDO), SUM(B8_EMPENHO), MIN(B8_DTVALID) "
-        "FROM SB8010 WHERE D_E_L_E_T_ = ' ' GROUP BY ...) T2 ON ... "
-        "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
-        "OFFSET <offset> ROWS FETCH NEXT <limit+1> ROWS ONLY) SB2\n"
+        "FromQry=(SELECT T0.B2_FILIAL, ..., NVL(T2.QTD_LOTES, 0), ..., "
+        "T1.C9_PEDIDO, T1.C9_ITEM, ... FROM SB2010 T0 INNER JOIN "
+        "(SELECT C9_FILIAL, C9_PRODUTO, C9_LOCAL, C9_PEDIDO, C9_ITEM, "
+        "C9_QTDLIB, C9_NFISCAL, C9_BLEST, C9_BLCRED FROM SC9010 "
+        "WHERE <coluna do filtro> = '<valor>' AND D_E_L_E_T_ = ' ') T1 ON ... "
+        "LEFT JOIN (SELECT B8_FILIAL, ..., COUNT(*), SUM(B8_SALDO), "
+        "SUM(B8_EMPENHO), MIN(B8_DTVALID) FROM SB8010 WHERE D_E_L_E_T_ = ' ' "
+        "GROUP BY ...) T2 ON ... ORDER BY "
+        "(T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T1.C9_PEDIDO, T1.C9_ITEM, "
+        "T0.R_E_C_N_O_ OFFSET <offset> ROWS FETCH NEXT <limit+1> ROWS ONLY) "
+        "SB2\n"
         "FilialFilter=false\n"
         "DeletedFilter=false\n"
         "```\n\n"
@@ -69,7 +79,9 @@ DOCS = {
         "vírgula, UTF-8 com BOM para abrir corretamente no Excel, cabeçalho "
         "`Filial`, `Produto`, `Armazem`, `SaldoAtual`, `QtdReservada`, "
         "`QtdEmpenhada`, `SaldoDisponivel`, `QtdLotes`, `SaldoLote`, "
-        "`EmpenhadoLote`, `DisponivelLote`, `ProximaValidade`) com "
+        "`EmpenhadoLote`, `DisponivelLote`, `ProximaValidade`, `Pedido`, "
+        "`ItemPedido`, `QtdLiberada`, `NotaFiscal`, "
+        "`BloqEstoque`, `BloqCredito`) com "
         "`Content-Disposition` de download (`bloqueio-estoque.csv`). No CSV o "
         f"`limit` padrão é o máximo ({MAX_ROWS}), para o download vir "
         "completo; `limit`/`offset` continuam valendo se informados. Os "
@@ -187,6 +199,12 @@ DOCS = {
                                 "empenhado_lote": 150.0,
                                 "disponivel_lote": 850.0,
                                 "proxima_validade": "20261231",
+                                "pedido": "045123",
+                                "item_pedido": "01",
+                                "qtd_liberada": 200.0,
+                                "nota_fiscal": None,
+                                "bloq_estoque": "R",
+                                "bloq_credito": None,
                             },
                         ],
                     },
@@ -196,9 +214,12 @@ DOCS = {
                     "example": (
                         "Filial,Produto,Armazem,SaldoAtual,QtdReservada,"
                         "QtdEmpenhada,SaldoDisponivel,QtdLotes,SaldoLote,"
-                        "EmpenhadoLote,DisponivelLote,ProximaValidade\r\n"
+                        "EmpenhadoLote,DisponivelLote,ProximaValidade,Pedido,"
+                        "ItemPedido,QtdLiberada,NotaFiscal,"
+                        "BloqEstoque,BloqCredito\r\n"
                         "TBA01,30010001,01,1000.0,400.0,150.0,450.0,"
-                        "3,1000.0,150.0,850.0,20261231\r\n"
+                        "3,1000.0,150.0,850.0,20261231,045123,01,"
+                        "200.0,,R,\r\n"
                     ),
                 },
             },

@@ -35,17 +35,20 @@ _FILTROS = {
 _FILTRO_RE = re.compile(r"^\d{1,6}$")
 _FILTRO_TAMANHO = 6
 
-# FromQry com a consulta de bloqueio de estoque: saldos da SB2 restritos aos
+# FromQry com a consulta de bloqueio de estoque: saldos da SB2 dos
 # produtos/armazéns dos itens liberados (SC9) que atendem ao filtro, com os
-# saldos por lote (SB8) agregados por produto/armazém via LEFT JOIN — uma
-# linha por registro da SB2. A subquery devolve apenas colunas reais do
-# dicionário — as colunas derivadas (saldo_disponivel, disponivel_lote) são
-# calculadas em Python; os agregados da SB8 são aliased para colunas reais
-# da própria SB8 (COUNT(*) usa B8_QTDORI, que não é retornada de verdade)
-# porque a genericQuery valida 'fields' contra o dicionário. As colunas do
-# índice da SB2 (B2_FILIAL, B2_COD, B2_LOCAL) precisam existir na subquery
-# mesmo que não sejam pedidas em 'fields': a genericQuery as referencia
-# internamente e retorna 500 se faltarem.
+# saldos por lote (SB8) agregados por produto/armazém via LEFT JOIN. A SC9
+# entra com o item liberado (pedido/item/qtd liberada/NF/bloqueios) — como
+# não é mais DISTINCT, o resultado é uma linha por item liberado (SC9): o
+# mesmo produto/armazém aparece repetido quando há mais de um item na carga.
+# A subquery devolve apenas colunas reais do dicionário — as colunas
+# derivadas (saldo_disponivel, disponivel_lote) são calculadas em Python; os
+# agregados da SB8 são aliased para colunas reais da própria SB8 (COUNT(*)
+# usa B8_QTDORI, que não é retornada de verdade) porque a genericQuery valida
+# 'fields' contra o dicionário. As colunas do índice da SB2 (B2_FILIAL,
+# B2_COD, B2_LOCAL) precisam existir na subquery mesmo que não sejam pedidas
+# em 'fields': a genericQuery as referencia internamente e retorna 500 se
+# faltarem.
 _FROM_QRY = (
     "(SELECT "
     "T0.B2_FILIAL AS B2_FILIAL, "
@@ -58,12 +61,19 @@ _FROM_QRY = (
     "NVL(T2.SALDO_LOTE, 0) AS B8_SALDO, "
     "NVL(T2.EMPENHADO_LOTE, 0) AS B8_EMPENHO, "
     "T2.PROXIMA_VALIDADE AS B8_DTVALID, "
+    "T1.C9_PEDIDO AS C9_PEDIDO, "
+    "T1.C9_ITEM AS C9_ITEM, "
+    "T1.C9_QTDLIB AS C9_QTDLIB, "
+    "T1.C9_NFISCAL AS C9_NFISCAL, "
+    "T1.C9_BLEST AS C9_BLEST, "
+    "T1.C9_BLCRED AS C9_BLCRED, "
     "T0.R_E_C_N_O_ AS R_E_C_N_O_, "
     "T0.R_E_C_D_E_L_ AS R_E_C_D_E_L_, "
     "T0.D_E_L_E_T_ AS D_E_L_E_T_ "
     "FROM SB2010 T0 "
     "INNER JOIN "
-    "(SELECT DISTINCT C9_FILIAL, C9_PRODUTO, C9_LOCAL "
+    "(SELECT C9_FILIAL, C9_PRODUTO, C9_LOCAL, C9_PEDIDO, C9_ITEM, "
+    "C9_QTDLIB, C9_NFISCAL, C9_BLEST, C9_BLCRED "
     "FROM SC9010 "
     "WHERE {filtro_coluna} = '{filtro_valor}' AND D_E_L_E_T_ = ' ') T1 "
     "ON T0.B2_FILIAL = T1.C9_FILIAL "
@@ -86,10 +96,11 @@ _FROM_QRY = (
     "AND T2.B8_LOCAL = T0.B2_LOCAL "
     "WHERE T0.D_E_L_E_T_ = ' ' "
     # Ordena pelo saldo disponível da SB2 (mesma expressão calculada em
-    # Python) com R_E_C_N_O_ como desempate: com OFFSET a ordenação precisa
-    # ser total, senão linhas empatadas podem trocar de página entre
-    # requisições.
-    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), T0.R_E_C_N_O_ "
+    # Python) e pelo pedido; C9_ITEM + R_E_C_N_O_ da SB2 fecham o desempate:
+    # com OFFSET a ordenação precisa ser total, senão linhas empatadas podem
+    # trocar de página entre requisições.
+    "ORDER BY (T0.B2_QATU - T0.B2_RESERVA - T0.B2_QEMP), "
+    "T1.C9_PEDIDO, T1.C9_ITEM, T0.R_E_C_N_O_ "
     "OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"
     ") SB2"
 )
@@ -108,6 +119,12 @@ _CSV_COLUMNS = [
     ("empenhado_lote", "EmpenhadoLote"),
     ("disponivel_lote", "DisponivelLote"),
     ("proxima_validade", "ProximaValidade"),
+    ("pedido", "Pedido"),
+    ("item_pedido", "ItemPedido"),
+    ("qtd_liberada", "QtdLiberada"),
+    ("nota_fiscal", "NotaFiscal"),
+    ("bloq_estoque", "BloqEstoque"),
+    ("bloq_credito", "BloqCredito"),
 ]
 
 
@@ -140,6 +157,13 @@ def _montar_item(row: dict[str, Any]) -> dict[str, Any]:
         "empenhado_lote": empenhado_lote,
         "disponivel_lote": saldo_lote - empenhado_lote,
         "proxima_validade": str(row.get("b8_dtvalid") or "").strip() or None,
+        # Dados do item liberado (SC9) — o item que "puxa" a linha.
+        "pedido": str(row.get("c9_pedido", "")).strip(),
+        "item_pedido": str(row.get("c9_item", "")).strip(),
+        "qtd_liberada": _to_float(row.get("c9_qtdlib")),
+        "nota_fiscal": str(row.get("c9_nfiscal") or "").strip() or None,
+        "bloq_estoque": str(row.get("c9_blest") or "").strip() or None,
+        "bloq_credito": str(row.get("c9_blcred") or "").strip() or None,
     }
 
 
@@ -194,10 +218,11 @@ def bloqueio_estoque(req: func.HttpRequest) -> func.HttpResponse:
         return json_error("'offset' deve ser um inteiro >= 0", 400)
 
     headers = {
-        "tables": "SB2,SB8",
+        "tables": "SB2,SB8,SC9",
         "fields": (
             "B2_FILIAL,B2_COD,B2_LOCAL,B2_QATU,B2_RESERVA,B2_QEMP,"
-            "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID"
+            "B8_QTDORI,B8_SALDO,B8_EMPENHO,B8_DTVALID,"
+            "C9_PEDIDO,C9_ITEM,C9_QTDLIB,C9_NFISCAL,C9_BLEST,C9_BLCRED"
         ),
         # Uma linha a mais que a página para saber se há próxima página.
         "pagesize": str(limit + 1),
