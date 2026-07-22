@@ -8,15 +8,18 @@ from .models import TableColumnsResponse
 DOCS = {
     "summary": "Colunas de uma tabela Protheus",
     "description": (
-        "Consulta a tabela de dicionário **SX3** no Protheus e retorna as colunas "
-        "(campo, título, tipo e tamanho) da tabela informada.\n\n"
+        "Consulta o dicionário de campos **SX3** (tabela física `SX3010`, clonada em "
+        "um banco **Azure SQL**) e retorna as colunas (campo, título, tipo e tamanho) "
+        "da tabela informada.\n\n"
         "Internamente executa:\n"
-        "```\n"
-        "tables=SX3&fields=X3_CAMPO,X3_TITULO,X3_TIPO,X3_TAMANHO\n"
-        "&where=SX3.D_E_L_E_T_=' ' AND SX3.X3_ARQUIVO='{table}'\n"
+        "```sql\n"
+        "SELECT X3_CAMPO, X3_TITULO, X3_TIPO, X3_TAMANHO\n"
+        "FROM SX3010\n"
+        "WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO = '{table}'\n"
+        "ORDER BY X3_ORDEM\n"
         "```\n\n"
-        "Campos que fazem o `genericQuery` responder *no content* são omitidos: "
-        "campos de controle/log (sufixos `_USERLGI` e `_USERLGA`) e campos do tipo Memo (`M`)."
+        "Campos de controle/log (sufixos `_USERLGI` e `_USERLGA`) e campos do tipo "
+        "Memo (`M`) são omitidos, mantendo o contrato original do endpoint."
     ),
     "tags": ["Protheus"],
     "method": "get",
@@ -76,11 +79,11 @@ DOCS = {
             },
         },
         502: {
-            "description": "Falha ao conectar ou obter resposta da API do Protheus",
+            "description": "Falha ao conectar ou consultar o banco de dados (Azure SQL)",
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {"error": "Falha ao conectar à API do Protheus"},
+                    "example": {"error": "Falha ao consultar o banco de dados"},
                 }
             },
         },

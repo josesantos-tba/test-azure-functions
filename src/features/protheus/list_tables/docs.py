@@ -8,12 +8,14 @@ from .models import TablesResponse
 DOCS = {
     "summary": "Lista de tabelas do Protheus",
     "description": (
-        "Consulta a tabela de dicionário **SX2** no Protheus e retorna todas as "
-        "tabelas cadastradas (chave, nome, modo, módulo e indicador PYME).\n\n"
+        "Consulta o dicionário de tabelas **SX2** (tabela física `SX2010`, clonada em "
+        "um banco **Azure SQL**) e retorna as tabelas cadastradas (chave, nome, modo, "
+        "módulo e indicador PYME).\n\n"
         "Internamente executa:\n"
-        "```\n"
-        "tables=SX2&fields=X2_CHAVE,X2_NOME,X2_MODO,X2_MODULO,X2_PYME\n"
-        "&where=SX2.D_E_L_E_T_=' '\n"
+        "```sql\n"
+        "SELECT X2_CHAVE, X2_NOME, X2_MODO, X2_MODULO, X2_PYME\n"
+        "FROM SX2010\n"
+        "WHERE D_E_L_E_T_ = ' '\n"
         "```"
     ),
     "tags": ["Protheus"],
@@ -61,11 +63,11 @@ DOCS = {
             },
         },
         502: {
-            "description": "Falha ao conectar ou obter resposta da API do Protheus",
+            "description": "Falha ao conectar ou consultar o banco de dados (Azure SQL)",
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {"error": "Falha ao conectar à API do Protheus"},
+                    "example": {"error": "Falha ao consultar o banco de dados"},
                 }
             },
         },

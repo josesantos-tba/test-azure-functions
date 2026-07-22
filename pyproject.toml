@@ -12,6 +12,7 @@ azure-functions-openapi = "*"
 requests = "*"
 pydantic = "*"
 databricks-sql-connector = "*"
+pyodbc = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"

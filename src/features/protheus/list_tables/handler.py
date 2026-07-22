@@ -1,14 +1,17 @@
-"""Handler do endpoint ``GET /tables`` — lista as tabelas do Protheus (SX2)."""
+"""Handler do endpoint ``GET /tables`` — lista as tabelas do Protheus (SX2).
+
+Lê o dicionário de tabelas direto da tabela ``SX2010`` (clone do SX2 do Protheus)
+em um banco **Azure SQL**, em vez de consultar o ``genericQuery`` do Protheus.
+"""
 
 import logging
 
 import azure.functions as func
-import requests
 
 from azure_functions_openapi import openapi
 
 from src.utils.auth import require_roles
-from src.utils.protheus import GENERIC_QUERY_URL, json_error, protheus_auth
+from src.utils.azure_sql import AZURE_SQL_SCHEMA, azure_sql_config_ok, fetch_all, json_error
 
 from .docs import DOCS
 from .models import ProtheusTable, TablesResponse
@@ -30,51 +33,59 @@ _ALLOWED_TABLES = frozenset(
     }
 )
 
+# Chaves (X2_CHAVE) equivalentes ao filtro acima: o antigo ``_is_allowed`` aceitava
+# a chave quando ela — ou ``chave+"010"`` (nome físico) — estava em _ALLOWED_TABLES.
+# Ordenado para manter a ordem estável entre os placeholders e os parâmetros.
+_ALLOWED_KEYS = tuple(
+    sorted(
+        _ALLOWED_TABLES
+        | {name[:-3] for name in _ALLOWED_TABLES if name.endswith("010")}
+    )
+)
 
-def _is_allowed(chave: str) -> bool:
-    return chave in _ALLOWED_TABLES or f"{chave}010" in _ALLOWED_TABLES
+# Consulta o dicionário SX2 (tabela física SX2010) já filtrando pelas tabelas
+# permitidas, ignorando registros logicamente excluídos (D_E_L_E_T_). O schema
+# vem de configuração (AZURE_SQL_SCHEMA), por isso é interpolado com segurança;
+# as chaves permitidas entram como bind parameters (IN).
+_QUERY = (
+    "SELECT X2_CHAVE, X2_NOME, X2_MODO, X2_MODULO, X2_PYME "
+    f"FROM {AZURE_SQL_SCHEMA}.SX2010 "
+    "WHERE D_E_L_E_T_ = ' ' "
+    f"AND X2_CHAVE IN ({', '.join('?' for _ in _ALLOWED_KEYS)})"
+)
+
+
+def _to_int(value: object) -> int:
+    """Converte X2_MODULO (texto vindo do SQL) em int, tolerando vazio/espaços."""
+    try:
+        return int(str(value or "").strip() or 0)
+    except ValueError:
+        return 0
 
 
 @openapi(**DOCS)
 @bp.route(route="tables", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @require_roles("Tables.Read")
 def list_tables(req: func.HttpRequest) -> func.HttpResponse:
-    params = {
-        "tables": "SX2",
-        "fields": "X2_CHAVE,X2_NOME,X2_MODO,X2_MODULO,X2_PYME",
-        "where": "SX2.D_E_L_E_T_=' '",
-        "page": "1",
-        "pagesize": "9999999",
-    }
-
-    headers = {
-        "FilialFilter": "false"
-    }
+    if not azure_sql_config_ok():
+        logging.error("Azure SQL não configurado (variáveis AZURE_SQL_* ausentes)")
+        return json_error("Banco de dados não configurado", 502)
 
     try:
-        resp = requests.get(
-            GENERIC_QUERY_URL,
-            params=params,
-            auth=protheus_auth(),
-            timeout=30,
-            headers=headers
-        )
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        logging.error("Protheus request failed: %s", exc)
-        return json_error("Falha ao conectar à API do Protheus", 502)
+        rows = fetch_all(_QUERY, _ALLOWED_KEYS)
+    except Exception as exc:  # noqa: BLE001 — falha de conexão/consulta ODBC
+        logging.error("Azure SQL query failed: %s", exc)
+        return json_error("Falha ao consultar o banco de dados", 502)
 
-    items = resp.json().get("items", [])
     tables = [
         ProtheusTable(
-            chave=item.get("x2_chave", "").strip(),
-            nome=item.get("x2_nome", "").strip(),
-            modo=item.get("x2_modo", "").strip(),
-            modulo=int(item.get("x2_modulo", 0)),
-            pyme=item.get("x2_pyme", "").strip(),
+            chave=(item.get("X2_CHAVE") or "").strip(),
+            nome=(item.get("X2_NOME") or "").strip(),
+            modo=(item.get("X2_MODO") or "").strip(),
+            modulo=_to_int(item.get("X2_MODULO")),
+            pyme=(item.get("X2_PYME") or "").strip(),
         )
-        for item in items
-        if _is_allowed(item.get("x2_chave", "").strip())
+        for item in rows
     ]
 
     return func.HttpResponse(
