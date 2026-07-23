@@ -11,15 +11,19 @@ import re
 from datetime import datetime
 from typing import Any
 
+# O contrato de filtros (operadores/tipos) é o mesmo do Protheus; reutilizamos a
+# referência única para a documentação não divergir entre os dois módulos.
+from src.utils.protheus_filters import FILTERS_REFERENCE_MD
+
 # Operadores que comparam a coluna com um único valor (col <op> ?).
 _COMPARISON_OPERATORS = {"=", "!=", ">", "<", "<=", ">="}
 # Operadores de texto que usam LIKE.
-_LIKE_OPERATORS = {"contem", "comeca com", "termina em"}
+_LIKE_OPERATORS = {"contains", "starts_with", "ends_with"}
 # Operadores que não recebem valor.
-_NO_VALUE_OPERATORS = {"em branco", "nao em branco"}
+_NO_VALUE_OPERATORS = {"is_blank", "is_not_blank"}
 # Conjunto completo de operadores aceitos.
 _VALID_OPERATORS = (
-    _COMPARISON_OPERATORS | _LIKE_OPERATORS | _NO_VALUE_OPERATORS | {"entre"}
+    _COMPARISON_OPERATORS | _LIKE_OPERATORS | _NO_VALUE_OPERATORS | {"between"}
 )
 # Tipos aceitos para o valor do filtro.
 _VALID_TYPES = {"string", "number", "date"}
@@ -69,20 +73,20 @@ def _build_filter_condition(
         )
 
     if operator in _NO_VALUE_OPERATORS:
-        if operator == "em branco":
+        if operator == "is_blank":
             return f"({column} IS NULL OR trim(cast({column} AS string)) = '')", [], None
         return f"({column} IS NOT NULL AND trim(cast({column} AS string)) <> '')", [], None
 
     if operator in _LIKE_OPERATORS:
         text = str(value)
         pattern = {
-            "contem": f"%{text}%",
-            "comeca com": f"{text}%",
-            "termina em": f"%{text}",
+            "contains": f"%{text}%",
+            "starts_with": f"{text}%",
+            "ends_with": f"%{text}",
         }[operator]
         return f"{column} LIKE ?", [pattern], None
 
-    if operator == "entre":
+    if operator == "between":
         start, err = _coerce_scalar(value, vtype)
         if err:
             return None, [], err
@@ -125,11 +129,11 @@ def parse_filters(raw: str) -> tuple[list[str] | None, list[Any], str | None]:
         value = item.get("value", "")
         value2 = item.get("value2", "")
 
-        # Conveniência: no 'entre', aceita value como lista [inicio, fim].
-        if operator == "entre" and isinstance(value, list):
+        # Conveniência: no 'between', aceita value como lista [inicio, fim].
+        if operator == "between" and isinstance(value, list):
             if len(value) != 2:
                 return None, [], (
-                    f"Filtro na posição {index}: 'entre' exige exatamente 2 valores"
+                    f"Filtro na posição {index}: 'between' exige exatamente 2 valores"
                 )
             value, value2 = value[0], value[1]
 
@@ -138,11 +142,11 @@ def parse_filters(raw: str) -> tuple[list[str] | None, list[Any], str | None]:
                 return None, [], (
                     f"Filtro na posição {index}: operador '{operator}' exige 'value'"
                 )
-        if operator == "entre" and (
+        if operator == "between" and (
             str(value).strip() == "" or str(value2).strip() == ""
         ):
             return None, [], (
-                f"Filtro na posição {index}: 'entre' exige 'value' e 'value2'"
+                f"Filtro na posição {index}: 'between' exige 'value' e 'value2'"
             )
 
         condition, cond_params, err = _build_filter_condition(
@@ -163,10 +167,5 @@ def filters_openapi_param(example: str) -> dict:
         "in": "query",
         "required": False,
         "schema": {"type": "string", "example": example},
-        "description": (
-            "Array JSON de filtros dinâmicos. Cada objeto: `column` (obrigatório), "
-            "`operator` (=, !=, >, <, <=, >=, contem, comeca com, termina em, entre, "
-            "em branco, nao em branco), `value`, `value2` (para 'entre') e "
-            "`type` (string | number | date). Múltiplos filtros são combinados com AND."
-        ),
+        "description": "Array JSON de filtros dinâmicos.\n\n" + FILTERS_REFERENCE_MD,
     }

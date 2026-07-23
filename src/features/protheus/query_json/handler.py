@@ -12,6 +12,12 @@ from azure_functions_openapi import openapi
 from src.utils.auth import require_roles
 from src.utils.protheus import GENERIC_QUERY_URL, json_error, protheus_auth
 from src.utils.protheus_filters import parse_filters
+from src.utils.table_config import (
+    effective_limit,
+    enforce_columns,
+    mandatory_filter,
+    table_enabled,
+)
 
 from .docs import DOCS
 from .models import DEFAULT_PAGESIZE, MAX_PAGESIZE, TABLE_SUFFIX, QueryResponse
@@ -140,6 +146,15 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
     if not _TABLE_RE.match(table):
         return json_error(f"Alias de tabela inválido: '{table}'", 400)
 
+    # Governança por tabela (src/config/table_config.json).
+    if not table_enabled(table):
+        return json_error(f"Tabela '{table}' não está habilitada", 403)
+
+    # Aplica whitelist + colunas obrigatórias sobre os campos pedidos.
+    fields, col_err = enforce_columns(table, fields)
+    if col_err:
+        return json_error(col_err, 400)
+
     recno = _parse_int(req.params.get("recno", ""), 0)
     pagesize = _parse_int(req.params.get("pagesize", ""), DEFAULT_PAGESIZE)
     if recno is None or recno < 0:
@@ -147,9 +162,12 @@ def query_json(req: func.HttpRequest) -> func.HttpResponse:
     if pagesize is None or pagesize < 1:
         return json_error("'pagesize' deve ser um inteiro >= 1", 400)
 
-    pagesize = min(pagesize, MAX_PAGESIZE)
+    pagesize = effective_limit(table, pagesize, MAX_PAGESIZE)
 
     base_conditions = ["D_E_L_E_T_ <> '*'"]
+
+    # Filtros obrigatórios da tabela: sempre aplicados, antes dos filtros do cliente.
+    base_conditions.extend(mandatory_filter(table))
 
     if filters_raw:
         conditions, err = parse_filters(filters_raw)

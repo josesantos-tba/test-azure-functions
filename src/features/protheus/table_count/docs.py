@@ -30,7 +30,12 @@ DOCS = {
         "FilialFilter=false\n"
         "```\n"
         "O `COUNT(*)` da tabela informada é devolvido pelo Protheus na coluna "
-        "`a10_prazo`, que é usada como resposta."
+        "`a10_prazo`, que é usada como resposta.\n\n"
+        "### Governança por tabela\n"
+        "A tabela pode ter regras de configuração aplicadas pelo servidor "
+        "(`src/config/table_config.json`): se estiver **desabilitada**, a resposta é "
+        "`403`; havendo **filtro obrigatório**, ele é combinado (AND) com os `filters` "
+        "do cliente, de modo que a contagem corresponda ao que a listagem retorna."
     ),
     "tags": ["Protheus"],
     "method": "get",
@@ -44,7 +49,7 @@ DOCS = {
         },
         filters_openapi_param(
             '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-            '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"}]'
+            '{"column":"E5_NUMERO","operator":"starts_with","value":"0001"}]'
         ),
     ],
     "response": {
@@ -76,14 +81,14 @@ DOCS = {
             },
         },
         403: {
-            "description": "Usuário autenticado sem a role 'Tables.Read'",
+            "description": (
+                "Acesso negado por falta da role 'Tables.Read', ou porque a tabela "
+                "não está habilitada na configuração"
+            ),
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {
-                        "error": "Acesso negado: você não tem a permissão necessária "
-                        "para acessar este recurso."
-                    },
+                    "example": {"error": "Tabela 'SE5' não está habilitada"},
                 }
             },
         },

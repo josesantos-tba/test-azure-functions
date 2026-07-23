@@ -11,6 +11,7 @@ from azure_functions_openapi import openapi
 from src.utils.auth import require_roles
 from src.utils.protheus import GENERIC_QUERY_URL, json_error, protheus_auth
 from src.utils.protheus_filters import parse_filters
+from src.utils.table_config import mandatory_filter, table_enabled
 
 from .docs import DOCS
 from .models import TABLE_SUFFIX, TableCountResponse
@@ -51,7 +52,14 @@ def table_count(req: func.HttpRequest) -> func.HttpResponse:
     if not _TABLE_RE.match(table):
         return json_error(f"Alias de tabela inválido: '{table}'", 400)
 
+    # Governança por tabela (src/config/table_config.json).
+    if not table_enabled(table):
+        return json_error(f"Tabela '{table}' não está habilitada", 403)
+
     where_parts = ["R_E_C_N_O_ > 0", "D_E_L_E_T_ <> '*'"]
+
+    # Filtros obrigatórios da tabela: sempre aplicados, antes dos filtros do cliente.
+    where_parts.extend(mandatory_filter(table))
 
     if filters_raw:
         conditions, err = parse_filters(filters_raw)

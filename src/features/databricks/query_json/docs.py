@@ -3,6 +3,7 @@
 from src.utils.databricks import ERROR_SCHEMA
 from src.utils.databricks.filters import filters_openapi_param
 from src.utils.openapi import inline_refs
+from src.utils.protheus_filters import FILTERS_REFERENCE_MD
 
 from .models import DEFAULT_PAGESIZE, MAX_PAGESIZE, QueryResponse
 
@@ -27,15 +28,9 @@ DOCS = {
         f"(padrão {DEFAULT_PAGESIZE}, máx. {MAX_PAGESIZE}). A resposta traz "
         "`has_next` e `next_page`.\n\n"
         "### Filtros dinâmicos (`filters`)\n"
-        "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
-        "- `column` (obrigatório): nome da coluna.\n"
-        "- `operator` (obrigatório): um dos operadores abaixo.\n"
-        "- `value`: valor comparado (dispensado em `em branco`/`nao em branco`).\n"
-        "- `value2`: segundo valor, usado apenas no operador `entre` "
-        "(ou informe `value` como lista `[inicio, fim]`).\n"
-        "- `type` (opcional): `string` (padrão), `number` ou `date` (`YYYY-MM-DD`).\n\n"
-        "Operadores suportados: `=`, `!=`, `>`, `<`, `<=`, `>=`, `contem`, "
-        "`comeca com`, `termina em`, `entre`, `em branco`, `nao em branco`.\n\n"
+        "`filters` é um **array JSON** de objetos.\n\n"
+        + FILTERS_REFERENCE_MD
+        + "\n\n"
         "Exemplo de chamada:\n"
         "```\n"
         "GET /api/databricks/query-json"

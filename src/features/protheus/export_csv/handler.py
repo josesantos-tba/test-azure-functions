@@ -13,6 +13,13 @@ from azure_functions_openapi import openapi
 from src.utils.auth import require_roles
 from src.utils.protheus import GENERIC_QUERY_URL, json_error, protheus_auth
 from src.utils.protheus_filters import parse_filters
+from src.utils.table_config import (
+    csv_enabled,
+    effective_limit,
+    enforce_columns,
+    mandatory_filter,
+    table_enabled,
+)
 
 from .docs import DOCS
 from .models import MAX_ROWS
@@ -42,6 +49,19 @@ def export_csv(req: func.HttpRequest) -> func.HttpResponse:
     if not _TABLE_RE.match(table):
         return json_error(f"Alias de tabela inválido: '{table}'", 400)
 
+    # Governança por tabela (src/config/table_config.json).
+    if not table_enabled(table):
+        return json_error(f"Tabela '{table}' não está habilitada", 403)
+    if not csv_enabled(table):
+        return json_error(
+            f"Exportação CSV desabilitada para a tabela '{table}'", 403
+        )
+
+    # Aplica whitelist + colunas obrigatórias sobre os campos pedidos.
+    fields, col_err = enforce_columns(table, fields)
+    if col_err:
+        return json_error(col_err, 400)
+
     if limit_raw:
         try:
             limit = int(limit_raw)
@@ -49,11 +69,14 @@ def export_csv(req: func.HttpRequest) -> func.HttpResponse:
             limit = 0
         if limit < 1:
             return json_error("'limit' deve ser um inteiro >= 1", 400)
-        limit = min(limit, MAX_ROWS)
+        limit = effective_limit(table, limit, MAX_ROWS)
     else:
-        limit = MAX_ROWS
+        limit = effective_limit(table, MAX_ROWS, MAX_ROWS)
 
     where_parts: list[str] = []
+
+    # Filtros obrigatórios da tabela: sempre aplicados, antes dos filtros do cliente.
+    where_parts.extend(mandatory_filter(table))
 
     if filters_raw:
         conditions, err = parse_filters(filters_raw)

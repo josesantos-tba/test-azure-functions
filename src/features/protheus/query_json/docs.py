@@ -2,7 +2,7 @@
 
 from src.utils.openapi import inline_refs
 from src.utils.protheus import ERROR_SCHEMA
-from src.utils.protheus_filters import filters_openapi_param
+from src.utils.protheus_filters import FILTERS_REFERENCE_MD, filters_openapi_param
 
 from .models import DEFAULT_PAGESIZE, MAX_PAGESIZE, TABLE_SUFFIX, QueryResponse
 
@@ -48,23 +48,25 @@ DOCS = {
         "uma segunda chamada. Não há retorno do total de registros — "
         "use o endpoint `table-count` (com os mesmos `filters`) se precisar do total.\n\n"
         "### Filtros dinâmicos (`filters`)\n"
-        "`filters` é um **array JSON** de objetos. Cada objeto aceita:\n"
-        "- `column` (obrigatório): nome da coluna (ex: `E5_VALOR`).\n"
-        "- `operator` (obrigatório): um dos operadores abaixo.\n"
-        "- `value`: valor comparado (dispensado em `em branco`/`nao em branco`).\n"
-        "- `value2`: segundo valor, usado apenas no operador `entre` "
-        "(ou informe `value` como lista `[inicio, fim]`).\n"
-        "- `type` (opcional): `string` (padrão), `number` ou `date` (`YYYY-MM-DD`).\n\n"
-        "Operadores suportados: `=`, `!=`, `>`, `<`, `<=`, `>=`, `contem`, "
-        "`comeca com`, `termina em`, `entre`, `em branco`, `nao em branco`.\n\n"
+        "`filters` é um **array JSON** de objetos.\n\n"
+        + FILTERS_REFERENCE_MD
+        + "\n\n"
+        "### Governança por tabela\n"
+        "A tabela pode ter regras de configuração aplicadas pelo servidor "
+        "(`src/config/table_config.json`), independentes do que o cliente enviar:\n"
+        "- **tabela desabilitada** → resposta `403`;\n"
+        "- **filtro obrigatório** sempre combinado (AND) com os `filters` do cliente;\n"
+        "- **colunas obrigatórias** sempre incluídas em `fields`;\n"
+        "- **colunas permitidas** (whitelist): pedir uma coluna fora dela → `400`;\n"
+        "- **limite máximo de linhas** próprio da tabela, respeitado no `pagesize`.\n\n"
         "Exemplo de chamada:\n"
         "```\n"
         "GET /api/query-json"
         "?table=SE5"
         "&fields=E5_FILIAL,E5_NUMERO,E5_DATA,E5_VALOR"
         "&filters=" + '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-        '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"},'
-        '{"column":"E5_DATA","operator":"entre","value":["2025-01-01","2025-01-31"],"type":"date"}]'
+        '{"column":"E5_NUMERO","operator":"starts_with","value":"0001"},'
+        '{"column":"E5_DATA","operator":"between","value":["2025-01-01","2025-01-31"],"type":"date"}]'
         + "&recno=0"
         "&pagesize=50"
         "```"
@@ -88,7 +90,7 @@ DOCS = {
         },
         filters_openapi_param(
             '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-            '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"}]'
+            '{"column":"E5_NUMERO","operator":"starts_with","value":"0001"}]'
         ),
         {
             "name": "recno",
@@ -131,11 +133,16 @@ DOCS = {
             },
         },
         400: {
-            "description": "Parâmetros obrigatórios ausentes ou inválidos",
+            "description": (
+                "Parâmetros obrigatórios ausentes/inválidos, ou coluna fora da "
+                "whitelist da tabela (`colunas_permitidas`)"
+            ),
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {"error": "Parâmetros obrigatórios ausentes: table, fields"},
+                    "example": {
+                        "error": "Colunas não permitidas para a tabela 'SE5': E5_SECRETO"
+                    },
                 }
             },
         },
@@ -149,14 +156,14 @@ DOCS = {
             },
         },
         403: {
-            "description": "Usuário autenticado sem a role 'Tables.Read'",
+            "description": (
+                "Acesso negado por falta da role 'Tables.Read', ou porque a tabela "
+                "não está habilitada na configuração"
+            ),
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {
-                        "error": "Acesso negado: você não tem a permissão necessária "
-                        "para acessar este recurso."
-                    },
+                    "example": {"error": "Tabela 'SE5' não está habilitada"},
                 }
             },
         },

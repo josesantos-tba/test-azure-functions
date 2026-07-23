@@ -18,6 +18,10 @@ pyodbc = "*"
 pytest = "*"
 pytest-mock = "*"
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

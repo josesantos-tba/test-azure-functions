@@ -34,12 +34,20 @@ DOCS = {
         "exportados — use o endpoint `table-count` (com os mesmos `filters`) para "
         "saber o total.\n\n"
         "Use `limit` (opcional) para exportar menos linhas que o máximo.\n\n"
+        "### Governança por tabela\n"
+        "A tabela pode ter regras de configuração aplicadas pelo servidor "
+        "(`src/config/table_config.json`), independentes do que o cliente enviar:\n"
+        "- **tabela desabilitada** ou **exportação CSV desabilitada** → resposta `403`;\n"
+        "- **filtro obrigatório** sempre combinado (AND) com os `filters` do cliente;\n"
+        "- **colunas obrigatórias** sempre incluídas em `fields`;\n"
+        "- **colunas permitidas** (whitelist): pedir uma coluna fora dela → `400`;\n"
+        "- **limite máximo de linhas** próprio da tabela, respeitado além do global.\n\n"
         "Exemplo de chamada:\n"
         "```\n"
         "GET /api/export-csv"
         "?table=SE5"
         "&fields=E5_FILIAL,E5_NUMERO,E5_DATA,E5_VALOR"
-        "&filters=" + '[{"column":"E5_DATA","operator":"entre",'
+        "&filters=" + '[{"column":"E5_DATA","operator":"between",'
         '"value":["2025-01-01","2025-01-31"],"type":"date"}]'
         "\n```"
     ),
@@ -62,7 +70,7 @@ DOCS = {
         },
         filters_openapi_param(
             '[{"column":"E5_VALOR","operator":">=","value":1000,"type":"number"},'
-            '{"column":"E5_NUMERO","operator":"comeca com","value":"0001"}]'
+            '{"column":"E5_NUMERO","operator":"starts_with","value":"0001"}]'
         ),
         {
             "name": "limit",
@@ -91,11 +99,16 @@ DOCS = {
             },
         },
         400: {
-            "description": "Parâmetros obrigatórios ausentes ou inválidos",
+            "description": (
+                "Parâmetros obrigatórios ausentes/inválidos, ou coluna fora da "
+                "whitelist da tabela (`colunas_permitidas`)"
+            ),
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
-                    "example": {"error": "Parâmetros obrigatórios ausentes: table, fields"},
+                    "example": {
+                        "error": "Colunas não permitidas para a tabela 'SE5': E5_SECRETO"
+                    },
                 }
             },
         },
@@ -109,13 +122,16 @@ DOCS = {
             },
         },
         403: {
-            "description": "Usuário autenticado sem a role 'Tables.Read'",
+            "description": (
+                "Acesso negado por falta da role 'Tables.Read', ou por regra de "
+                "configuração da tabela (tabela não habilitada, ou exportação CSV "
+                "desabilitada)"
+            ),
             "content": {
                 "application/json": {
                     "schema": ERROR_SCHEMA,
                     "example": {
-                        "error": "Acesso negado: você não tem a permissão necessária "
-                        "para acessar este recurso."
+                        "error": "Exportação CSV desabilitada para a tabela 'SE5'"
                     },
                 }
             },

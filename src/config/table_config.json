@@ -1,0 +1,65 @@
+{
+  "_default": {
+    "habilitada": true,
+    "csv_export_habilitado": true,
+    "filtro_obrigatorio": null,
+    "colunas_obrigatorias": [],
+    "colunas_permitidas": null,
+    "limite_max_linhas": null
+  },
+  "SE5": {
+    "filtro_obrigatorio": [
+      {
+        "column": "E5_VALOR",
+        "operator": ">",
+        "value": 0,
+        "type": "number"
+      }
+    ],
+    "csv_export_habilitado": false,
+    "colunas_obrigatorias": [
+      "E5_FILIAL"
+    ],
+    "limite_max_linhas": 5000
+  },
+  "CTK": {
+    "csv_export_habilitado": false
+  },
+  "CT2": {
+    "colunas_permitidas": [
+      "CT2_FILIAL",
+      "CT2_DATA",
+      "CT2_LOTE",
+      "CT2_SBLOTE",
+      "CT2_DOC",
+      "CT2_LINHA",
+      "CT2_MOEDLC",
+      "CT2_DC",
+      "CT2_DEBITO",
+      "CT2_VALOR",
+      "CT2_HIST",
+      "CT2_EMPORI",
+      "CT2_FILORI",
+      "CT2_TPSALD",
+      "CT2_SEQUEN",
+      "CT2_MANUAL",
+      "CT2_ORIGEM",
+      "CT2_ROTINA",
+      "CT2_AGLUT",
+      "CT2_LP",
+      "CT2_SEQHIS",
+      "CT2_SEQLAN",
+      "CT2_TAXA",
+      "CT2_VLR01",
+      "CT2_VLR02",
+      "CT2_VLR03",
+      "CT2_VLR04",
+      "CT2_VLR05",
+      "CT2_CRCONV",
+      "CT2_DTCV3",
+      "CT2_CTLSLD",
+      "CT2_INCONS",
+      "CT2_MSUIDT"
+    ]
+  }
+}

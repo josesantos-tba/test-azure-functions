@@ -24,17 +24,53 @@ def _to_protheus_date(value: str) -> str | None:
 # Operadores que comparam a coluna com um único valor (col <op> valor).
 _COMPARISON_OPERATORS = {"=", "!=", ">", "<", "<=", ">="}
 # Operadores de texto que usam LIKE.
-_LIKE_OPERATORS = {"contem", "comeca com", "termina em"}
+_LIKE_OPERATORS = {"contains", "starts_with", "ends_with"}
 # Operadores que não recebem valor.
-_NO_VALUE_OPERATORS = {"em branco", "nao em branco"}
+_NO_VALUE_OPERATORS = {"is_blank", "is_not_blank"}
 # Conjunto completo de operadores aceitos.
 _VALID_OPERATORS = (
-    _COMPARISON_OPERATORS | _LIKE_OPERATORS | _NO_VALUE_OPERATORS | {"entre"}
+    _COMPARISON_OPERATORS | _LIKE_OPERATORS | _NO_VALUE_OPERATORS | {"between"}
 )
 # Tipos aceitos para o valor do filtro.
 _VALID_TYPES = {"string", "number", "date"}
 # Nome de coluna válido (evita injeção via nome de coluna).
 _COLUMN_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+# Referência (Markdown) de todos os operadores e tipos aceitos por um filtro.
+# Fonte única usada na documentação OpenAPI dos endpoints que aceitam filtros
+# (query-json, export-csv, table-count) e do filtro_obrigatorio (table-config).
+# Mantida junto das definições acima para não sair de sincronia.
+FILTERS_REFERENCE_MD = (
+    "Cada filtro é um objeto com:\n"
+    "- `column` (**obrigatório**): nome da coluna (ex: `E5_VALOR`).\n"
+    "- `operator` (**obrigatório**): um dos operadores abaixo.\n"
+    "- `value`: valor comparado (dispensado em `is_blank`/`is_not_blank`).\n"
+    "- `value2`: segundo valor, usado apenas no operador `between` "
+    "(ou informe `value` como lista `[inicio, fim]`).\n"
+    "- `type`: `string` (padrão), `number` ou `date`.\n\n"
+    "**Operadores (`operator`):**\n\n"
+    "| Operador | Grupo | Efeito | Valor |\n"
+    "|---|---|---|---|\n"
+    "| `=` | comparação | igual a | `value` |\n"
+    "| `!=` | comparação | diferente de | `value` |\n"
+    "| `>` | comparação | maior que | `value` |\n"
+    "| `<` | comparação | menor que | `value` |\n"
+    "| `>=` | comparação | maior ou igual a | `value` |\n"
+    "| `<=` | comparação | menor ou igual a | `value` |\n"
+    "| `contains` | texto (LIKE) | contém o texto (`%valor%`) | `value` |\n"
+    "| `starts_with` | texto (LIKE) | começa com o texto (`valor%`) | `value` |\n"
+    "| `ends_with` | texto (LIKE) | termina com o texto (`%valor`) | `value` |\n"
+    "| `between` | intervalo | entre dois valores (`BETWEEN`) | `value` e `value2` |\n"
+    "| `is_blank` | sem valor | coluna nula ou vazia | — |\n"
+    "| `is_not_blank` | sem valor | coluna preenchida | — |\n\n"
+    "**Tipos (`type`):**\n\n"
+    "| Tipo | Descrição |\n"
+    "|---|---|\n"
+    "| `string` | Padrão. Valor tratado como texto (entre aspas e com escape). |\n"
+    "| `number` | Valor numérico (sem aspas); rejeita valor não-numérico. |\n"
+    "| `date` | Data no formato `YYYY-MM-DD`, convertida para `YYYYMMDD` (padrão Protheus). |\n\n"
+    "Múltiplos filtros são combinados com **AND**."
+)
 
 
 def _escape(value: str) -> str:
@@ -83,20 +119,20 @@ def _build_filter_condition(
         return None, f"Tipo inválido: '{vtype}'. Válidos: {', '.join(sorted(_VALID_TYPES))}"
 
     if operator in _NO_VALUE_OPERATORS:
-        if operator == "em branco":
+        if operator == "is_blank":
             return f"({column} IS NULL OR RTRIM({column})='')", None
         return f"({column} IS NOT NULL AND RTRIM({column})<>'')", None
 
     if operator in _LIKE_OPERATORS:
         text = _escape(value)
         pattern = {
-            "contem": f"%{text}%",
-            "comeca com": f"{text}%",
-            "termina em": f"%{text}",
+            "contains": f"%{text}%",
+            "starts_with": f"{text}%",
+            "ends_with": f"%{text}",
         }[operator]
         return f"{column} LIKE '{pattern}'", None
 
-    if operator == "entre":
+    if operator == "between":
         literal_start, err = _format_scalar(value, vtype)
         if err:
             return None, err
@@ -113,7 +149,7 @@ def _build_filter_condition(
 
 
 def parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
-    """Interpreta o parâmetro ``filters`` (JSON) e devolve as condições SQL.
+    """Interpreta o parâmetro ``filters`` (JSON *string*) e devolve as condições SQL.
 
     Retorna ``(condições, None)`` em caso de sucesso ou ``(None, erro)``.
     """
@@ -122,6 +158,17 @@ def parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
     except ValueError:
         return None, "'filters' deve ser um JSON válido (array de objetos)"
 
+    return build_conditions(parsed)
+
+
+def build_conditions(parsed: Any) -> tuple[list[str] | None, str | None]:
+    """Converte uma lista de filtros **já desserializada** em condições SQL.
+
+    Mesma estrutura aceita em ``parse_filters`` (array de objetos com ``column``,
+    ``operator``, ``value``, ``value2`` e ``type``), útil quando os filtros vêm de
+    uma fonte que já é uma lista Python (ex.: arquivo de configuração), não de uma
+    string JSON. Retorna ``(condições, None)`` ou ``(None, erro)``.
+    """
     if not isinstance(parsed, list):
         return None, "'filters' deve ser um array JSON de objetos"
 
@@ -136,11 +183,11 @@ def parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
         value = item.get("value", "")
         value2 = item.get("value2", "")
 
-        # Conveniência: no 'entre', aceita value como lista [inicio, fim].
-        if operator == "entre" and isinstance(value, list):
+        # Conveniência: no 'between', aceita value como lista [inicio, fim].
+        if operator == "between" and isinstance(value, list):
             if len(value) != 2:
                 return None, (
-                    f"Filtro na posição {index}: 'entre' exige exatamente 2 valores"
+                    f"Filtro na posição {index}: 'between' exige exatamente 2 valores"
                 )
             value, value2 = value[0], value[1]
 
@@ -149,11 +196,11 @@ def parse_filters(raw: str) -> tuple[list[str] | None, str | None]:
                 return None, (
                     f"Filtro na posição {index}: operador '{operator}' exige 'value'"
                 )
-        if operator == "entre" and (
+        if operator == "between" and (
             str(value).strip() == "" or str(value2).strip() == ""
         ):
             return None, (
-                f"Filtro na posição {index}: 'entre' exige 'value' e 'value2'"
+                f"Filtro na posição {index}: 'between' exige 'value' e 'value2'"
             )
 
         condition, err = _build_filter_condition(column, operator, value, value2, vtype)
@@ -171,10 +218,5 @@ def filters_openapi_param(example: str) -> dict:
         "in": "query",
         "required": False,
         "schema": {"type": "string", "example": example},
-        "description": (
-            "Array JSON de filtros dinâmicos. Cada objeto: `column` (obrigatório), "
-            "`operator` (=, !=, >, <, <=, >=, contem, comeca com, termina em, entre, "
-            "em branco, nao em branco), `value`, `value2` (para 'entre') e "
-            "`type` (string | number | date). Múltiplos filtros são combinados com AND."
-        ),
+        "description": "Array JSON de filtros dinâmicos.\n\n" + FILTERS_REFERENCE_MD,
     }
