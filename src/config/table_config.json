@@ -26,6 +26,18 @@
     "csv_export_habilitado": false
   },
   "CT2": {
+    "filtro_obrigatorio": [
+      {
+        "column": "CT2_DATA",
+        "operator": ">",
+        "value": "2026-01-01",
+        "type": "date"
+      }
+    ],
+    "colunas_obrigatorias": [
+      "CT2_FILIAL"
+    ],
+    "csv_export_habilitado": false,
     "colunas_permitidas": [
       "CT2_FILIAL",
       "CT2_DATA",
